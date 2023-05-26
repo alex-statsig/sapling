@@ -564,13 +564,35 @@ export default class ServerToClientAPI {
         break;
       }
       case 'fetchCommitMessageTemplate': {
-        repo
-          .runCommand(['debugcommitmessage'])
-          .then(result => {
-            const template = result.stdout
-              .replace(repo.IGNORE_COMMIT_MESSAGE_LINES_REGEX, '')
-              .replace(/^<Replace this line with a title. Use 1 line only, 67 chars or less>/, '');
-            this.postMessage({type: 'fetchedCommitMessageTemplate', template});
+        const results = Promise.allSettled([
+          repo.runCommand(['debugcommitmessage']),
+          repo.getConfig('committemplate.isl'),
+        ]);
+        results
+          .then(([debugCommitMessageResult, configResult]) => {
+            if (
+              debugCommitMessageResult.status !== 'fulfilled' &&
+              configResult.status !== 'fulfilled'
+            ) {
+              throw new Error('debugcommitmessage command and config committemplate.isl failed');
+            }
+
+            // Prefer pulling from debugcommitmessage command output, but fallback to config
+            const resultOutput =
+              debugCommitMessageResult.status === 'fulfilled'
+                ? debugCommitMessageResult.value.stdout
+                : configResult.status === 'fulfilled'
+                ? (configResult.value ?? '').replace(/\\n/g, '\n')
+                : '';
+            if (resultOutput.length > 0) {
+              const template = resultOutput
+                .replace(repo.IGNORE_COMMIT_MESSAGE_LINES_REGEX, '')
+                .replace(
+                  /^<Replace this line with a title. Use 1 line only, 67 chars or less>/,
+                  '',
+                );
+              this.postMessage({type: 'fetchedCommitMessageTemplate', template});
+            }
           })
           .catch(err => {
             logger?.error('Could not fetch commit message template', err);

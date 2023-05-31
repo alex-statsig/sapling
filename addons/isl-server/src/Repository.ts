@@ -32,6 +32,7 @@ import type {
   RepoRelativePath,
   FetchedUncommittedChanges,
   FetchedCommits,
+  BlameInfo,
 } from 'isl/src/types';
 
 import {Internal} from './Internal';
@@ -141,6 +142,8 @@ export class Repository {
 
   private mergeConflicts: MergeConflicts | undefined = undefined;
   private uncommittedChanges: FetchedUncommittedChanges | null = null;
+  private commitCache: Map<string, CommitInfo> = new Map();
+  private blameCache: Map<string, BlameInfo> = new Map();
   private smartlogCommits: FetchedCommits | null = null;
 
   private mergeConflictsEmitter = new TypedEventEmitter<'change', MergeConflicts | undefined>();
@@ -186,6 +189,7 @@ export class Repository {
 
     this.watchForChanges = new WatchForChanges(info, logger, this.pageFocusTracker, kind => {
       if (kind === 'uncommitted changes') {
+        this.blameCache.clear();
         this.fetchUncommittedChanges();
       } else if (kind === 'commits') {
         this.fetchSmartlogCommits();
@@ -519,6 +523,47 @@ export class Repository {
       },
     };
   }
+
+  fetchBlame = async (path: string) => {
+    try {
+      if (this.blameCache.has(path)) {
+        return this.blameCache.get(path);
+      }
+      // Json format doesn't include commit data, so we use the default format and manually parse
+      // TODO: Pass -r 'wdir()' to get the blame for the working copy version of the file
+      const proc = await this.runCommand(['blame', path, '-ucd']);
+      const lines =
+        proc.stdout.trim() === ''
+          ? []
+          : proc.stdout.split('\n').map(line => {
+              const parsed = /^ *([^ ]+) ([^ ]+) (.+?): (.*)/.exec(line);
+              return {
+                user: parsed?.[1] ?? '',
+                node: parsed?.[2] ?? '',
+                date: parsed?.[3] ?? '',
+                line: parsed?.[4] ?? '',
+              };
+            });
+      this.blameCache.set(path, lines);
+      return lines;
+    } catch (err) {
+      this.logger.error('Error fetching blame: ', err);
+    }
+  };
+
+  fetchCommit = async (hash: string) => {
+    try {
+      if (this.commitCache.has(hash)) {
+        return this.commitCache.get(hash);
+      }
+      const proc = await this.runCommand(['log', '--template', FETCH_TEMPLATE, '--rev', hash]);
+      const [commit] = parseCommitInfoOutput(this.logger, proc.stdout.trim());
+      this.commitCache.set(hash, commit);
+      return commit;
+    } catch (err) {
+      this.logger.error('Error fetching commit: ', err);
+    }
+  };
 
   fetchUncommittedChanges = serializeAsyncCall(async () => {
     const fetchStartTimestamp = Date.now();

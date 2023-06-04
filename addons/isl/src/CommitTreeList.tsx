@@ -28,19 +28,24 @@ import {useArrowKeysToChangeSelection} from './selection';
 import {
   commitFetchError,
   commitsShownRange,
-  hasExperimentalFeatures,
   isFetchingAdditionalCommits,
   latestHeadCommit,
   latestUncommittedChangesData,
   useRunOperation,
 } from './serverAPIState';
-import {editingStackHashes, loadingStackState, useStackEditState} from './stackEditState';
+import {
+  bumpStackEditMetric,
+  editingStackHashes,
+  loadingStackState,
+  sendStackEditMetrics,
+  useStackEditState,
+} from './stackEditState';
 import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {ErrorShortMessages} from 'isl-server/src/constants';
 import {useRecoilState, useRecoilValue, useSetRecoilState} from 'recoil';
 import {useContextMenu} from 'shared/ContextMenu';
 import {Icon} from 'shared/Icon';
-import {notEmpty} from 'shared/utils';
+import {generatorContains, notEmpty} from 'shared/utils';
 
 import './CommitTreeList.css';
 
@@ -219,9 +224,10 @@ function FetchingAdditionalCommitsButton() {
 }
 
 function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElement | null {
-  const experimentalFeatures = useRecoilValue(hasExperimentalFeatures);
   const reviewProvider = useRecoilValue(codeReviewProvider);
   const diffMap = useRecoilValue(allDiffSummaries);
+  const stackHashes = useRecoilValue(editingStackHashes);
+  const loadingState = useRecoilValue(loadingStackState);
   const runOperation = useRunOperation();
 
   // buttons at the bottom of the stack
@@ -230,8 +236,13 @@ function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElemen
   // Non-empty only when actions is non-empty.
   const moreActions: Array<ContextMenuItem> = [];
 
+  const isStackEditingActivated =
+    stackHashes.size > 0 &&
+    loadingState.state === 'hasValue' &&
+    generatorContains(walkTreePostorder([tree]), v => stackHashes.has(v.info.hash));
+
   const contextMenu = useContextMenu(() => moreActions);
-  if (reviewProvider !== null) {
+  if (reviewProvider !== null && !isStackEditingActivated) {
     const reviewActions =
       diffMap.value == null ? {} : reviewProvider?.getSupportedStackActions(tree, diffMap.value);
     const resubmittableStack = reviewActions?.resubmittableStack;
@@ -298,7 +309,7 @@ function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElemen
     }
   }
 
-  if (experimentalFeatures) {
+  if (tree.children.length > 0) {
     actions.push(<StackEditButton key="edit-stack" tree={tree} />);
   }
 
@@ -328,6 +339,33 @@ function StackEditConfirmButtons(): React.ReactElement {
   const canUndo = stackEdit.canUndo();
   const canRedo = stackEdit.canRedo();
 
+  const handleUndo = () => {
+    stackEdit.undo();
+    bumpStackEditMetric('undo');
+  };
+
+  const handleRedo = () => {
+    stackEdit.redo();
+    bumpStackEditMetric('redo');
+  };
+
+  const handleSaveChanges = () => {
+    const importStack = stackEdit.commitStack.calculateImportStack({
+      goto: originalHead?.hash,
+      rewriteDate: Date.now() / 1000,
+    });
+    const op = new ImportStackOperation(importStack);
+    runOperation(op);
+    sendStackEditMetrics(true);
+    // Exit stack editing.
+    setStackHashes(new Set());
+  };
+
+  const handleCancel = () => {
+    sendStackEditMetrics(false);
+    setStackHashes(new Set<Hash>());
+  };
+
   // Show [Cancel] [Save changes] [Undo] [Redo].
   return (
     <>
@@ -338,9 +376,7 @@ function StackEditConfirmButtons(): React.ReactElement {
         <VSCodeButton
           className="cancel-edit-stack-button"
           appearance="secondary"
-          onClick={() => {
-            setStackHashes(new Set<Hash>());
-          }}>
+          onClick={handleCancel}>
           <T>Cancel</T>
         </VSCodeButton>
       </Tooltip>
@@ -351,15 +387,7 @@ function StackEditConfirmButtons(): React.ReactElement {
         <VSCodeButton
           className="confirm-edit-stack-button"
           appearance="primary"
-          onClick={() => {
-            const importStack = stackEdit.commitStack.calculateImportStack({
-              goto: originalHead?.hash,
-            });
-            const op = new ImportStackOperation(importStack);
-            runOperation(op);
-            // Exit stack editing.
-            setStackHashes(new Set());
-          }}>
+          onClick={handleSaveChanges}>
           <T>Save changes</T>
         </VSCodeButton>
       </Tooltip>
@@ -374,7 +402,7 @@ function StackEditConfirmButtons(): React.ReactElement {
           )
         }
         placement="bottom">
-        <VSCodeButton appearance="icon" disabled={!canUndo} onClick={() => stackEdit.undo()}>
+        <VSCodeButton appearance="icon" disabled={!canUndo} onClick={handleUndo}>
           <Icon icon="discard" />
         </VSCodeButton>
       </Tooltip>
@@ -389,7 +417,7 @@ function StackEditConfirmButtons(): React.ReactElement {
           )
         }
         placement="bottom">
-        <VSCodeButton appearance="icon" disabled={!canRedo} onClick={() => stackEdit.redo()}>
+        <VSCodeButton appearance="icon" disabled={!canRedo} onClick={handleRedo}>
           <Icon icon="redo" />
         </VSCodeButton>
       </Tooltip>

@@ -21,6 +21,7 @@ bonsai_git_mapping = { version = "0.1.0", path = "../bonsai_git_mapping" }
 bonsai_globalrev_mapping = { version = "0.1.0", path = "../bonsai_globalrev_mapping" }
 bonsai_hg_mapping = { version = "0.1.0", path = "../bonsai_hg_mapping" }
 bonsai_svnrev_mapping = { version = "0.1.0", path = "../bonsai_svnrev_mapping" }
+bonsai_tag_mapping = { version = "0.1.0", path = "../bonsai_tag_mapping" }
 bookmarks = { version = "0.1.0", path = "../bookmarks" }
 bookmarks_movement = { version = "0.1.0", path = "../bookmarks/bookmarks_movement" }
 borrowed = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
@@ -111,6 +112,7 @@ xdiff = { version = "0.1.0", path = "../../scm/lib/xdiff" }
 
 [dev-dependencies]
 assert_matches = "1.5"
+commit_graph_testlib = { version = "0.1.0", path = "../repo_attributes/commit_graph/commit_graph_testlib" }
 cross_repo_sync_test_utils = { version = "0.1.0", path = "../commit_rewriting/cross_repo_sync/test_utils" }
 derived_data_utils = { version = "0.1.0", path = "../derived_data/utils" }
 fbinit-tokio = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }

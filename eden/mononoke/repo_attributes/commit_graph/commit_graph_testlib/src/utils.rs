@@ -10,11 +10,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
+use commit_graph::AncestorsStreamBuilder;
 use commit_graph::CommitGraph;
 use commit_graph_types::edges::ChangesetNode;
 use commit_graph_types::storage::CommitGraphStorage;
 use context::CoreContext;
 use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use futures::Future;
 use mononoke_types::ChangesetId;
 use mononoke_types::Generation;
@@ -152,23 +154,29 @@ pub async fn assert_skip_tree_lowest_common_ancestor(
     Ok(())
 }
 
-pub async fn assert_ancestors_difference_with(
+pub async fn assert_ancestors_difference_with<Property, Out>(
     graph: &CommitGraph,
     ctx: &CoreContext,
     heads: Vec<&str>,
     common: Vec<&str>,
-    property_fn: impl Fn(ChangesetId) -> bool + 'static,
+    property_fn: Property,
     ancestors_difference: Vec<&str>,
-) -> Result<()> {
+) -> Result<()>
+where
+    Property: Fn(ChangesetId) -> Out + Send + Sync + 'static,
+    Out: Future<Output = Result<bool>> + Send + Sync + 'static,
+{
     let heads = heads.into_iter().map(name_cs_id).collect();
     let common = common.into_iter().map(name_cs_id).collect();
 
     assert_eq!(
-        graph
-            .ancestors_difference_with(ctx, heads, common, property_fn)
+        AncestorsStreamBuilder::new(Arc::new(graph.clone()), ctx.clone(), heads)
+            .exclude_ancestors_of(common)
+            .without(property_fn)
+            .build()
             .await?
-            .into_iter()
-            .collect::<HashSet<_>>(),
+            .try_collect::<HashSet<_>>()
+            .await?,
         ancestors_difference
             .into_iter()
             .map(name_cs_id)
@@ -201,7 +209,7 @@ pub async fn assert_ancestors_difference(
     Ok(())
 }
 
-async fn assert_topological_order(
+pub async fn assert_topological_order(
     graph: &CommitGraph,
     ctx: &CoreContext,
     cs_ids: &Vec<ChangesetId>,
@@ -249,13 +257,17 @@ pub async fn assert_range_stream(
     Ok(())
 }
 
-pub async fn assert_ancestors_frontier_with(
+pub async fn assert_ancestors_frontier_with<Property, Out>(
     graph: &CommitGraph,
     ctx: &CoreContext,
     heads: Vec<&str>,
-    property_fn: impl Fn(ChangesetId) -> bool,
+    property_fn: Property,
     ancestors_frontier: Vec<&str>,
-) -> Result<()> {
+) -> Result<()>
+where
+    Property: Fn(ChangesetId) -> Out + Send + Sync + 'static,
+    Out: Future<Output = Result<bool>>,
+{
     let heads = heads.into_iter().map(name_cs_id).collect();
 
     assert_eq!(

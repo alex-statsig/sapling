@@ -107,7 +107,7 @@ perf-event-open-sys = { version = "4.0", git = "https://github.com/krallin/perf-
 quickcheck = { git = "https://github.com/jakoschiko/quickcheck", rev = "6ecdf5bb4b0132ce66670b4d46453aa022ea892c" }
 tar = { package = "tar", git = "https://github.com/jrwats/tar-rs.git", rev = "21eeccdc08d9b87f6ad610f9b20a5839aabe5974" }
 terminfo = { git = "https://github.com/rust-terminfo/terminfo", rev = "9b4e1c6aae79644c9da7a2e312e3c10ee4759930" }
-toml = { git = "https://github.com/fbsource/toml", rev = "0ee7001fb64f7c5094a00d3a360e402201f498fe" }
+text_placeholder = { git = "https://github.com/jsgf/text-placeholder.git", rev = "0a6dd4a2a3f89a990aa52863c8f01fd3fe91a31e" }
 tracing = { git = "https://github.com/fbsource/tracing.git", rev = "3399637795795560a073fc60a2e6cfa67b8421f1" }
 tracing-appender = { git = "https://github.com/fbsource/tracing.git", rev = "3399637795795560a073fc60a2e6cfa67b8421f1" }
 tracing-core = { git = "https://github.com/fbsource/tracing.git", rev = "3399637795795560a073fc60a2e6cfa67b8421f1" }
@@ -195,7 +195,8 @@ members = [
   "cmdlib/extensions",
   "cmdlib/log",
   "cmdlib/mononoke_app",
-  "cmdlib/running",
+  "cmdlib/mononoke_app/shutdown_timeout",
+  "cmdlib/mononoke_app/tls",
   "cmdlib/scrubbing",
   "cmdlib/sharding",
   "cmdlib/sharding_ext",
@@ -228,6 +229,7 @@ members = [
   "common/reloader",
   "common/rendezvous",
   "common/retry",
+  "common/running",
   "common/rust/caching_ext",
   "common/rust/slog_ext",
   "common/rust/sql_ext",
@@ -341,6 +343,7 @@ members = [
   "repo_attributes/commit_graph/in_memory_commit_graph_storage",
   "repo_attributes/commit_graph/preloaded_commit_graph_storage",
   "repo_attributes/commit_graph/sql_commit_graph_storage",
+  "repo_attributes/deletion_log",
   "repo_attributes/repo_bookmark_attrs",
   "repo_attributes/repo_cross_repo",
   "repo_attributes/repo_derived_data",

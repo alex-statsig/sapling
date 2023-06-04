@@ -4,6 +4,12 @@
   $ eagerepo
   $ . $TESTDIR/git.sh
   $ setconfig diff.git=True
+  $ enable rebase copytrace
+
+  $ setupconfig() {
+  >   setconfig copytrace.fastcopytrace=True
+  >   setconfig copytrace.dagcopytrace=True
+  > }
 
 Prepare repo
 
@@ -41,3 +47,23 @@ High similarity threshold should fail to find the rename
 Low max rename edit cost should fail to find the rename
   $ hg debugcopytrace -s .~1 -d . a --config copytrace.max-edit-cost=0
   {"a": null}
+
+Test missing files in source side
+
+  $ hg init --git repo2
+  $ cd repo2
+  $ setupconfig
+  $ drawdag <<'EOS'
+  > C   # C/y = 1\n (renamed from x)
+  > |   # C/C = (removed)
+  > |
+  > | B # B/x = 1\n2\n
+  > | | # B/B = (removed)
+  > |/
+  > A   # A/x = 1\n
+  >     # A/A = (removed)
+  > EOS
+
+  $ hg rebase -r $C -d $B
+  rebasing 470d2f079ab1 "C"
+  merging x and y to y

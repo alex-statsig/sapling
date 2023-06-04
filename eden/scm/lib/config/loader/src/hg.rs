@@ -964,6 +964,15 @@ pub fn all_existing_user_paths<'a>(id: &'a Identity) -> impl Iterator<Item = Pat
         .flat_map(|id| id.user_config_paths().into_iter().filter(|p| p.exists()))
 }
 
+pub fn default_user_config_path() -> Result<PathBuf> {
+    let id = identity::default();
+    let res = all_existing_user_paths(&id)
+        .chain(id.user_config_paths().into_iter())
+        .next()
+        .with_context(|| "unable to determine user config location")?;
+    Ok(res)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -971,9 +980,9 @@ mod tests {
 
     use once_cell::sync::Lazy;
     use tempdir::TempDir;
+    use testutil::envs::lock_env;
 
     use super::*;
-    use crate::lock_env;
 
     static CONFIG_ENV_VAR: Lazy<&str> =
         Lazy::new(|| identity::default().env_name_static("CONFIG").unwrap());
@@ -1087,7 +1096,7 @@ mod tests {
 
     #[test]
     fn test_config_path() {
-        let mut env = crate::lock_env();
+        let mut env = lock_env();
 
         let dir = TempDir::new("test_config_path").unwrap();
 

@@ -32,10 +32,7 @@ import collections
 
 import dbm
 import os
-import sys
 import time
-
-import bindings
 
 from edenscm import (
     cmdutil,
@@ -422,10 +419,20 @@ def _domergecopies(orig, repo, cdst, csrc, base):
         if sourcecommitnum > sourcecommitlimit:
             return orig(repo, cdst, csrc, base)
 
-    cp = copiesmod._forwardcopies(base, csrc)
-    for dst, src in pycompat.iteritems(cp):
-        if src in mdst:
-            copies[dst] = src
+    if _dagcopytraceenabled(repo.ui):
+        dag_copy_trace = repo._dagcopytrace
+        srcmissingfiles = [
+            f for f in changedfiles if f not in csrc and f in base and f in mdst
+        ]
+        for f in srcmissingfiles:
+            src_file = dag_copy_trace.trace_rename(base.node(), csrc.node(), f)
+            if src_file:
+                copies[src_file] = f
+    else:
+        cp = copiesmod._forwardcopies(base, csrc)
+        for dst, src in pycompat.iteritems(cp):
+            if src in mdst:
+                copies[dst] = src
 
     # file is missing if it isn't present in the destination, but is present in
     # the base and present in the source.
@@ -436,13 +443,7 @@ def _domergecopies(orig, repo, cdst, csrc, base):
     )
     repo.ui.metrics.gauge("copytrace_missingfiles", len(missingfiles))
     if missingfiles and _dagcopytraceenabled(repo.ui):
-        dag_copy_trace = bindings.copytrace.dagcopytrace(
-            repo.changelog.inner,
-            repo.manifestlog.datastore,
-            repo.fileslog.filescmstore,
-            repo.changelog.dag,
-            repo.ui._rcfg,
-        )
+        dag_copy_trace = repo._dagcopytrace
         for f in missingfiles:
             dst_file = dag_copy_trace.trace_rename(csrc.node(), cdst.node(), f)
             if dst_file:

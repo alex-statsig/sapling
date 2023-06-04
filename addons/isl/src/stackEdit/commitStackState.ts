@@ -106,14 +106,14 @@ type CommitStackRecord = RecordOf<CommitStackProps>;
  *
  * Provides read write APIs for editing the stack.
  * Under the hood, continuous changes to a same file are grouped
- * to file stacks. Part of analysis and edit operations are deletegated
- * to corrosponding file stacks.
+ * to file stacks. Part of analysis and edit operations are delegated
+ * to corresponding file stacks.
  */
 export class CommitStackState extends SelfUpdate<CommitStackRecord> {
   // Initial setup.
 
   /**
-   * Construct from an exported stack. For efficient operatoins,
+   * Construct from an exported stack. For efficient operations,
    * call `.buildFileStacks()` to build up states.
    *
    * `record` initialization is for internal use only.
@@ -179,7 +179,7 @@ export class CommitStackState extends SelfUpdate<CommitStackRecord> {
 
   /**
    * Return mutable revs.
-   * This filters out public or commits outisde the original stack export request.
+   * This filters out public or commits outside the original stack export request.
    */
   mutableRevs(): Rev[] {
     return [...this.stack.filter(c => c.immutableKind !== 'hash').map(c => c.rev)];
@@ -203,7 +203,7 @@ export class CommitStackState extends SelfUpdate<CommitStackRecord> {
       }
       const file = commit.files.get(path);
       if (file !== undefined) {
-        // Commit modifieds `file`.
+        // Commit modified `file`.
         return file;
       }
     }
@@ -282,13 +282,19 @@ export class CommitStackState extends SelfUpdate<CommitStackRecord> {
    *   otherwise this parameter is ignored.
    * - preserveDirtyFiles: if true, do not change files in the working copy.
    *   Under the hood, this changes the "goto" to "reset".
+   * - rewriteDate: if set, the unix timestamp (in seconds) for newly
+   *   created commits.
    *
    * Example use-cases:
    * - Editing a stack (clean working copy): goto = origCurrentHash
    * - commit -i: create new rev, goto = maxRev, preserveDirtyFiles = true
    * - amend -i, absorb: goto = origCurrentHash, preserveDirtyFiles = true
    */
-  calculateImportStack(opts?: {goto?: Rev | Hash; preserveDirtyFiles?: boolean}): ImportStack {
+  calculateImportStack(opts?: {
+    goto?: Rev | Hash;
+    preserveDirtyFiles?: boolean;
+    rewriteDate?: number;
+  }): ImportStack {
     // Resolve goto to a Rev.
     // Special case: if it's at the old stack top, use the new stack top instead.
     const gotoRev: Rev | undefined =
@@ -347,7 +353,7 @@ export class CommitStackState extends SelfUpdate<CommitStackRecord> {
       const importCommit: ImportCommit = {
         mark: revToMark(commit.rev),
         author: commit.author,
-        date: [commit.date.unix, commit.date.tz],
+        date: [opts?.rewriteDate ?? commit.date.unix, commit.date.tz],
         text: commit.text,
         parents: commit.parents.toArray().map(revToMarkOrHash),
         predecessors: commit.originalNodes.toArray(),
@@ -920,7 +926,7 @@ export class CommitStackState extends SelfUpdate<CommitStackRecord> {
   }
 
   /**
-   * Reorder stack. Similar to running `histedit`, follwed by reordering
+   * Reorder stack. Similar to running `histedit`, followed by reordering
    * commits.
    *
    * See `canReorder` for the meaning of `order`.
@@ -1149,9 +1155,9 @@ function compactSequence(revs: Rev[]): Rev[] {
   return revs.map(rev => sortedRevs.indexOf(rev));
 }
 
-/** Reorder rev and rev + 1. Return [] if rev is out of ragne */
+/** Reorder rev and rev + 1. Return [] if rev is out of range */
 export function reorderedRevs(state: CommitStackState, rev: number): Rev[] {
-  // Basically, `toSpliced`, but it's not avaialble everywhere.
+  // Basically, `toSpliced`, but it's not available everywhere.
   const order = state.revs();
   if (rev < 0 || rev >= order.length - 1) {
     return [];

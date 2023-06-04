@@ -6,16 +6,22 @@
  */
 
 use std::cmp::min;
+use std::collections::HashSet;
+use std::iter::zip;
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use configmodel::Config;
 use configmodel::ConfigExt;
+use dag::Vertex;
+use hg_metrics::increment_counter;
+use lru_cache::LruCache;
 use manifest::DiffType;
 use manifest::Manifest;
 use manifest_tree::Diff;
 use manifest_tree::TreeManifest;
+use parking_lot::Mutex;
 use pathmatcher::AlwaysMatcher;
 use storemodel::futures::StreamExt;
 use storemodel::ReadFileContents;
@@ -40,6 +46,8 @@ const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.8;
 const DEFAULT_MAX_EDIT_COST: u64 = 1000;
 /// Control if MetadataRenameFinder fallbacks to content similarity finder
 const DEFAULT_FALLBACK_TO_CONTENT_SIMILARITY: bool = false;
+/// Default Rename cache size
+const DEFAULT_RENAME_CACHE_SIZE: usize = 1000;
 
 /// Finding rename between old and new trees (commits).
 /// old_tree is a parent of new_tree
@@ -51,6 +59,7 @@ pub trait RenameFinder {
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
         old_path: &RepoPath,
+        new_vertex: &Vertex,
     ) -> Result<Option<RepoPathBuf>>;
 
     /// Find the old path of the given new path in the old_tree
@@ -59,6 +68,7 @@ pub trait RenameFinder {
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
         new_path: &RepoPath,
+        new_vertex: &Vertex,
     ) -> Result<Option<RepoPathBuf>>;
 }
 
@@ -79,18 +89,24 @@ struct RenameFinderInner {
     file_reader: Arc<dyn ReadFileContents<Error = anyhow::Error> + Send + Sync>,
     // Read configs
     config: Arc<dyn Config + Send + Sync>,
+    // Dir move caused rename candidates
+    cache: Mutex<LruCache<CacheKey, Key>>,
 }
+
+type CacheKey = (Vertex, RepoPathBuf);
 
 impl MetadataRenameFinder {
     pub fn new(
         file_reader: Arc<dyn ReadFileContents<Error = anyhow::Error> + Send + Sync>,
         config: Arc<dyn Config + Send + Sync>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let cache_size = get_rename_cache_size(&config)?;
         let inner = RenameFinderInner {
             file_reader,
             config,
+            cache: Mutex::new(LruCache::new(cache_size)),
         };
-        Self { inner }
+        Ok(Self { inner })
     }
 }
 
@@ -101,9 +117,16 @@ impl RenameFinder for MetadataRenameFinder {
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
         old_path: &RepoPath,
+        new_vertex: &Vertex,
     ) -> Result<Option<RepoPathBuf>> {
-        let new_files = self.inner.get_added_files(old_tree, new_tree)?;
-        let candidates = select_rename_candidates(new_files, old_path, &self.inner.config)?;
+        let candidates = self.inner.generate_candidates(
+            old_tree,
+            new_tree,
+            old_path,
+            new_vertex,
+            SearchDirection::Forward,
+        )?;
+
         let found = self
             .inner
             .read_renamed_metadata_forward(candidates.clone(), old_path)
@@ -115,7 +138,12 @@ impl RenameFinder for MetadataRenameFinder {
 
         // fallback to content similarity
         let old_path_key = self.inner.get_key_from_path(old_tree, old_path)?;
-        self.inner.find_similar_file(candidates, old_path_key).await
+        let found = self
+            .inner
+            .find_similar_file(candidates, old_path_key)
+            .await?;
+        emit_content_similarity_fallback_metric(found.is_some());
+        Ok(found)
     }
 
     async fn find_rename_backward(
@@ -123,6 +151,7 @@ impl RenameFinder for MetadataRenameFinder {
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
         new_path: &RepoPath,
+        new_vertex: &Vertex,
     ) -> Result<Option<RepoPathBuf>> {
         let new_key = self.inner.get_key_from_path(new_tree, new_path)?;
         let found = self
@@ -135,9 +164,16 @@ impl RenameFinder for MetadataRenameFinder {
         }
 
         // fallback to content similarity
-        let old_files = self.inner.get_deleted_files(old_tree, new_tree)?;
-        let candidates = select_rename_candidates(old_files, new_path, &self.inner.config)?;
-        self.inner.find_similar_file(candidates, new_key).await
+        let candidates = self.inner.generate_candidates(
+            old_tree,
+            new_tree,
+            new_path,
+            new_vertex,
+            SearchDirection::Backward,
+        )?;
+        let found = self.inner.find_similar_file(candidates, new_key).await?;
+        emit_content_similarity_fallback_metric(found.is_some());
+        Ok(found)
     }
 }
 
@@ -145,12 +181,14 @@ impl ContentSimilarityRenameFinder {
     pub fn new(
         file_reader: Arc<dyn ReadFileContents<Error = anyhow::Error> + Send + Sync>,
         config: Arc<dyn Config + Send + Sync>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let cache_size = get_rename_cache_size(&config)?;
         let inner = RenameFinderInner {
             file_reader,
             config,
+            cache: Mutex::new(LruCache::new(cache_size)),
         };
-        Self { inner }
+        Ok(Self { inner })
     }
 }
 
@@ -161,9 +199,16 @@ impl RenameFinder for ContentSimilarityRenameFinder {
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
         old_path: &RepoPath,
+        new_vertex: &Vertex,
     ) -> Result<Option<RepoPathBuf>> {
         self.inner
-            .find_rename_in_direction(old_tree, new_tree, old_path, SearchDirection::Forward)
+            .find_rename_in_direction(
+                old_tree,
+                new_tree,
+                old_path,
+                new_vertex,
+                SearchDirection::Forward,
+            )
             .await
     }
 
@@ -172,56 +217,108 @@ impl RenameFinder for ContentSimilarityRenameFinder {
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
         new_path: &RepoPath,
+        new_vertex: &Vertex,
     ) -> Result<Option<RepoPathBuf>> {
         self.inner
-            .find_rename_in_direction(old_tree, new_tree, new_path, SearchDirection::Backward)
+            .find_rename_in_direction(
+                old_tree,
+                new_tree,
+                new_path,
+                new_vertex,
+                SearchDirection::Backward,
+            )
             .await
     }
 }
 
 impl RenameFinderInner {
-    fn get_added_files(
+    fn generate_candidates(
         &self,
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
+        path: &RepoPath,
+        vertex: &Vertex,
+        direction: SearchDirection,
     ) -> Result<Vec<Key>> {
-        let mut files = Vec::new();
-        let matcher = AlwaysMatcher::new();
-        let diff = Diff::new(old_tree, new_tree, &matcher)?;
-        for entry in diff {
-            let entry = entry?;
-            if let DiffType::RightOnly(file_metadata) = entry.diff_type {
-                let path = entry.path;
-                let key = Key {
-                    path,
-                    hgid: file_metadata.hgid,
-                };
-                files.push(key);
+        let cache_key = (vertex.clone(), path.to_owned());
+        {
+            let mut cache = self.cache.lock();
+            if let Some(val) = cache.get_mut(&cache_key) {
+                return Ok(vec![val.clone()]);
             }
         }
-        Ok(files)
+
+        let (mut added_files, mut deleted_files) =
+            self.get_added_and_deleted_files(old_tree, new_tree)?;
+        let batch_mv_candidates = detect_batch_move(&mut added_files, &mut deleted_files);
+
+        if batch_mv_candidates.is_empty() {
+            match direction {
+                SearchDirection::Forward => {
+                    select_rename_candidates(added_files, path, &self.config)
+                }
+                SearchDirection::Backward => {
+                    select_rename_candidates(deleted_files, path, &self.config)
+                }
+            }
+        } else {
+            let mut candidates: Vec<Key> = vec![];
+            let mut cache = self.cache.lock();
+
+            match direction {
+                SearchDirection::Forward => {
+                    for (to, from) in batch_mv_candidates {
+                        let key = (vertex.clone(), from.path);
+                        cache.insert(key, to);
+                    }
+                }
+                SearchDirection::Backward => {
+                    for (to, from) in batch_mv_candidates {
+                        let key = (vertex.clone(), to.path);
+                        cache.insert(key, from);
+                    }
+                }
+            }
+
+            if let Some(val) = cache.get_mut(&cache_key) {
+                candidates.push(val.to_owned());
+            }
+            Ok(candidates)
+        }
     }
 
-    fn get_deleted_files(
+    fn get_added_and_deleted_files(
         &self,
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
-    ) -> Result<Vec<Key>> {
-        let mut files = Vec::new();
+    ) -> Result<(Vec<Key>, Vec<Key>)> {
+        let mut added_files = Vec::new();
+        let mut deleted_files = Vec::new();
         let matcher = AlwaysMatcher::new();
         let diff = Diff::new(old_tree, new_tree, &matcher)?;
         for entry in diff {
             let entry = entry?;
-            if let DiffType::LeftOnly(file_metadata) = entry.diff_type {
-                let path = entry.path;
-                let key = Key {
-                    path,
-                    hgid: file_metadata.hgid,
-                };
-                files.push(key);
+            match entry.diff_type {
+                DiffType::RightOnly(file_metadata) => {
+                    let path = entry.path;
+                    let key = Key {
+                        path,
+                        hgid: file_metadata.hgid,
+                    };
+                    added_files.push(key);
+                }
+                DiffType::LeftOnly(file_metadata) => {
+                    let path = entry.path;
+                    let key = Key {
+                        path,
+                        hgid: file_metadata.hgid,
+                    };
+                    deleted_files.push(key);
+                }
+                _ => {}
             }
         }
-        Ok(files)
+        Ok((added_files, deleted_files))
     }
 
     async fn read_renamed_metadata_forward(
@@ -256,14 +353,14 @@ impl RenameFinderInner {
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
         source_path: &RepoPath,
+        new_vertex: &Vertex,
         direction: SearchDirection,
     ) -> Result<Option<RepoPathBuf>> {
         tracing::trace!(?source_path, ?direction, " find_rename_in_direction");
-        let candidates = match direction {
-            SearchDirection::Forward => self.get_added_files(old_tree, new_tree)?,
-            SearchDirection::Backward => self.get_deleted_files(old_tree, new_tree)?,
-        };
-        let candidates = select_rename_candidates(candidates, source_path, &self.config)?;
+
+        let candidates =
+            self.generate_candidates(old_tree, new_tree, source_path, new_vertex, direction)?;
+
         tracing::trace!(candidates_len = candidates.len(), " found");
 
         let source_tree = match direction {
@@ -271,6 +368,7 @@ impl RenameFinderInner {
             SearchDirection::Backward => new_tree,
         };
         let source = self.get_key_from_path(source_tree, source_path)?;
+
         self.find_similar_file(candidates, source).await
     }
 
@@ -325,7 +423,7 @@ impl RenameFinderInner {
         Ok(key)
     }
 
-    pub(crate) fn get_similarity_threshold(&self) -> Result<f32> {
+    fn get_similarity_threshold(&self) -> Result<f32> {
         let v = self
             .config
             .get_opt::<f32>("copytrace", "similarity-threshold")?
@@ -333,7 +431,7 @@ impl RenameFinderInner {
         Ok(v)
     }
 
-    pub(crate) fn get_max_edit_cost(&self) -> Result<u64> {
+    fn get_max_edit_cost(&self) -> Result<u64> {
         let v = self
             .config
             .get_opt::<u64>("copytrace", "max-edit-cost")?
@@ -341,7 +439,7 @@ impl RenameFinderInner {
         Ok(v)
     }
 
-    pub(crate) fn get_fallback_to_content_similarity(&self) -> Result<bool> {
+    fn get_fallback_to_content_similarity(&self) -> Result<bool> {
         let v = self
             .config
             .get_opt::<bool>("copytrace", "fallback-to-content-similarity")?
@@ -350,7 +448,7 @@ impl RenameFinderInner {
     }
 }
 
-pub(crate) fn select_rename_candidates(
+fn select_rename_candidates(
     mut candidates: Vec<Key>,
     source_path: &RepoPath,
     config: &dyn Config,
@@ -373,6 +471,65 @@ pub(crate) fn select_rename_candidates(
     } else {
         Ok(candidates)
     }
+}
+
+fn detect_batch_move(added_files: &mut Vec<Key>, deleted_files: &mut Vec<Key>) -> Vec<(Key, Key)> {
+    if added_files.len() != deleted_files.len() {
+        return vec![];
+    }
+
+    added_files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    deleted_files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+
+    let stripped_pairs: HashSet<(String, String)> = zip(added_files.clone(), deleted_files.clone())
+        .map(|(a, b)| strip_common_prefix_and_suffix(a.path.as_str(), b.path.as_str()))
+        .collect();
+
+    if stripped_pairs.len() > 1 {
+        vec![]
+    } else {
+        zip(added_files, deleted_files)
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect()
+    }
+}
+
+fn strip_common_prefix_and_suffix(s1: &str, s2: &str) -> (String, String) {
+    let s1_chars: Vec<char> = s1.chars().collect();
+    let s2_chars: Vec<char> = s2.chars().collect();
+
+    let mut start = 0;
+    while start < s1_chars.len() && start < s2_chars.len() && s1_chars[start] == s2_chars[start] {
+        start += 1;
+    }
+
+    let mut end = 0;
+    while end < s1_chars.len() - start
+        && end < s2_chars.len() - start
+        && s1_chars[s1_chars.len() - 1 - end] == s2_chars[s2_chars.len() - 1 - end]
+    {
+        end += 1;
+    }
+
+    let stripped_s1: String = s1_chars[start..s1_chars.len() - end].iter().collect();
+    let stripped_s2: String = s2_chars[start..s2_chars.len() - end].iter().collect();
+    (stripped_s1, stripped_s2)
+}
+
+fn get_rename_cache_size(config: &dyn Config) -> Result<usize> {
+    let v = config
+        .get_opt::<usize>("copytrace", "rename-cache-size")?
+        .unwrap_or(DEFAULT_RENAME_CACHE_SIZE);
+    Ok(v)
+}
+
+fn emit_content_similarity_fallback_metric(is_found: bool) {
+    let metric = if is_found {
+        "copytrace_content_similarity_fallback_success"
+    } else {
+        "copytrace_content_similarity_fallback_failure"
+    };
+    increment_counter(metric, 1);
 }
 
 #[cfg(test)]
@@ -406,5 +563,96 @@ mod tests {
         let path = RepoPath::from_str(path).unwrap().to_owned();
         let hgid = HgId::null_id().clone();
         Key { path, hgid }
+    }
+
+    #[test]
+    fn test_detect_batch_move() {
+        let mut added_files: Vec<Key> = vec![
+            gen_key("a/b/c.txt"),
+            gen_key("a/b/c.md"),
+            gen_key("a/d.txt"),
+        ];
+
+        let mut deleted_files: Vec<Key> = vec![
+            gen_key("b/b/c.txt"),
+            gen_key("b/b/c.md"),
+            gen_key("b/d.txt"),
+        ];
+
+        assert_eq!(
+            detect_batch_move(&mut added_files, &mut deleted_files),
+            vec![
+                (gen_key("a/b/c.md"), gen_key("b/b/c.md")),
+                (gen_key("a/b/c.txt"), gen_key("b/b/c.txt")),
+                (gen_key("a/d.txt"), gen_key("b/d.txt")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_detect_batch_move_with_unequal_num_of_files() {
+        let mut added_files: Vec<Key> = vec![
+            gen_key("a/b/c.txt"),
+            gen_key("a/b/c.md"),
+            gen_key("a/d.txt"),
+            gen_key("a/e.txt"),
+        ];
+
+        let mut deleted_files: Vec<Key> = vec![
+            gen_key("b/b/c.txt"),
+            gen_key("b/b/c.md"),
+            gen_key("b/d.txt"),
+        ];
+
+        assert_eq!(
+            detect_batch_move(&mut added_files, &mut deleted_files),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn test_detect_batch_move_with_unmatched_basename() {
+        let mut added_files: Vec<Key> = vec![
+            gen_key("a/b/c.txt"),
+            gen_key("a/b/c.md"),
+            gen_key("a/d.txt"),
+        ];
+
+        let mut deleted_files: Vec<Key> = vec![
+            gen_key("b/b/ccc.txt"),
+            gen_key("b/b/c.md"),
+            gen_key("b/d.txt"),
+        ];
+
+        assert_eq!(
+            detect_batch_move(&mut added_files, &mut deleted_files),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn test_strip_common_prefix_and_suffix() {
+        let func = strip_common_prefix_and_suffix;
+
+        assert_eq!(func("", ""), ("".to_owned(), "".to_owned()));
+        assert_eq!(func("", "a"), ("".to_owned(), "a".to_owned()));
+        assert_eq!(func("a", ""), ("a".to_owned(), "".to_owned()));
+
+        assert_eq!(func("1a2", "1b2"), ("a".to_owned(), "b".to_owned()));
+        assert_eq!(func("1a22", "1b2"), ("a2".to_owned(), "b".to_owned()));
+
+        assert_eq!(
+            func("/a/1.txt", "/a/1.md"),
+            ("txt".to_owned(), "md".to_owned())
+        );
+        assert_eq!(
+            func("/a/b/1.txt", "/a/c/1.txt"),
+            ("b".to_owned(), "c".to_owned())
+        );
+
+        assert_eq!(
+            func("/文件/我的/好.txt", "/文件/你的/好.txt"),
+            ("我".to_owned(), "你".to_owned()),
+        );
     }
 }

@@ -11,8 +11,12 @@
 from __future__ import absolute_import
 
 import operator
+import os
 
-from edenscm import encoding, json, pycompat, util
+from typing import Optional
+
+from edenscm import encoding, error, json, pycompat, util
+from edenscm.i18n import _
 from edenscm.node import bin, hex
 
 from . import arcconfig, phabricator_graphql_client, phabricator_graphql_client_urllib
@@ -33,11 +37,15 @@ class GraphQLConfigError(Exception):
     pass
 
 
-class Client(object):
-    def __init__(self, repodir=None, repo=None):
+class Client:
+    def __init__(self, repodir=None, repo=None, ui=None):
         if repo is not None:
             if repodir is None:
                 repodir = repo.root
+            ui = ui or repo.ui
+        else:
+            if ui is None:
+                raise error.ProgrammingError("either repo or ui needs to be provided")
         if not repodir:
             repodir = pycompat.getcwd()
         self._mock = "HG_ARC_CONDUIT_MOCK" in encoding.environ
@@ -54,20 +62,20 @@ class Client(object):
         self._catslocation = None
         self._cats = None
         self._applyarcconfig(
-            arcconfig.loadforpath(repodir), repo.ui.config("phabricator", "arcrc_host")
+            arcconfig.loadforpath(repodir), ui.config("phabricator", "arcrc_host")
         )
         if not self._mock:
-            app_id = repo.ui.config("phabricator", "graphql_app_id")
-            self._host = repo.ui.config("phabricator", "graphql_host")
+            app_id = ui.config("phabricator", "graphql_app_id")
+            self._host = ui.config("phabricator", "graphql_host")
             if app_id is None or self._host is None:
                 raise GraphQLConfigError(
                     "GraphQL unavailable because of missing configuration"
                 )
 
             # phabricator.use-unix-socket is escape hatch in case something breaks.
-            unix_socket_path = repo.ui.configbool(
+            unix_socket_path = ui.configbool(
                 "phabricator", "use-unix-socket", default=True
-            ) and repo.ui.config("auth_proxy", "unix_socket_path")
+            ) and ui.config("auth_proxy", "unix_socket_path")
 
             self._client = phabricator_graphql_client.PhabricatorGraphQLClient(
                 phabricator_graphql_client_urllib.PhabricatorGraphQLClientRequests(
@@ -151,14 +159,7 @@ class Client(object):
                           scm_name
                       }
                       source_control_system
-                      phabricator_version_properties {
-                        edges {
-                          node {
-                            property_name
-                            property_value
-                          }
-                        }
-                      }
+                      commit_hash_best_effort
                     }
                     phabricator_diff_commit {
                       nodes {
@@ -176,9 +177,14 @@ class Client(object):
         params = {"diffid": diffid}
         ret = self._client.query(timeout, query, params)
 
-        latest = ret["data"]["phabricator_diff_query"][0]["results"]["nodes"][0][
-            "latest_associated_phabricator_version_regardless_of_viewer"
-        ]
+        latest: Optional[dict] = ret["data"]["phabricator_diff_query"][0]["results"][
+            "nodes"
+        ][0]["latest_associated_phabricator_version_regardless_of_viewer"]
+
+        if latest is None:
+            raise ClientError(
+                None, f"D{diffid} does not have any commits associated with it"
+            )
 
         # Massage commits into {repo_name => commit_hash}
         commits = ret["data"]["phabricator_diff_query"][0]["results"]["nodes"][0][
@@ -191,10 +197,10 @@ class Client(object):
 
         return latest
 
-    def getlandednodes(self, repo, diffids, timeout=10):
-        """Get landed nodes for diffids. Return {diffid: node}, {diffid: set(node)}"""
+    def getnodes(self, repo, diffids, diff_status, timeout=10):
+        """Get nodes for diffids for a list of diff  status. Return {diffid: node}, {diffid: set(node)}"""
         if not diffids:
-            return {}, {}
+            return {}, {}, {}
         if self._mock:
             ret = self._mocked_responses.pop()
         else:
@@ -206,6 +212,7 @@ class Client(object):
                         results {
                             nodes {
                                 number
+                                diff_status_name
                                 phabricator_versions {
                                     nodes {
                                         local_commits {
@@ -232,6 +239,7 @@ class Client(object):
             #     "phabricator_diff_query": [
             #       { "results": {"nodes": [{
             #               "number": 123,
+            #               "diff_status_name": "Closed",
             #               "phabricator_versions": {
             #                 "nodes": [
             #                   {"local_commits": [{"primary_commit": {"commit_identifier": "d131c2d7408acf233a4b2db04382005434346421"}}]},
@@ -240,29 +248,32 @@ class Client(object):
             #               "phabricator_diff_commit": {
             #                 "nodes": [
             #                   { "commit_identifier": "9396e4a63208eb034b8b9cca909f9914cb2fbe85" } ] } } ] } } ] } }
-        return self._getlandednodes(repo, ret)
+        return self._getnodes(repo, ret, diff_status)
 
-    def _getlandednodes(self, repo, ret):
+    def _getnodes(self, repo, ret, diff_status_list):
         difftolocalcommits = {}  # {str: set(node)}
         diffidentifiers = {}
+        difftostatus = {}
         for result in ret["data"]["phabricator_diff_query"][0]["results"]["nodes"]:
             try:
                 diffid = "%s" % result["number"]
-                nodes = result["phabricator_diff_commit"]["nodes"]
-                for n in nodes:
-                    diffidentifiers[n["commit_identifier"]] = diffid
+                _status = result["diff_status_name"]
+                if _status in diff_status_list:
+                    difftostatus[diffid] = _status
+                    nodes = result["phabricator_diff_commit"]["nodes"]
+                    for n in nodes:
+                        diffidentifiers[n["commit_identifier"]] = diffid
 
-                allversionnodes = result["phabricator_versions"]["nodes"]
-                for version in allversionnodes:
-                    versioncommits = version["local_commits"]
-                    for commit in versioncommits:
-                        difftolocalcommits.setdefault(diffid, set()).add(
-                            bin(commit["primary_commit"]["commit_identifier"])
-                        )
+                    allversionnodes = result["phabricator_versions"]["nodes"]
+                    for version in allversionnodes:
+                        versioncommits = version["local_commits"]
+                        for commit in versioncommits:
+                            difftolocalcommits.setdefault(diffid, set()).add(
+                                bin(commit["primary_commit"]["commit_identifier"])
+                            )
             except (KeyError, IndexError, TypeError):
                 # Not fatal.
                 continue
-
         difftonode = {}
         maybehash = [bin(i) for i in diffidentifiers if len(i) == 40]
         # Batch up node existence checks using filternodes() in case
@@ -317,7 +328,7 @@ class Client(object):
                     node = globalrevtonode.get(globalrev)
                     if node:
                         difftonode[diffid] = node
-        return difftonode, difftolocalcommits
+        return difftonode, difftolocalcommits, difftostatus
 
     def getrevisioninfo(self, timeout, signalstatus, *revision_numbers):
         rev_numbers = self._normalizerevisionnumbers(revision_numbers)
@@ -575,6 +586,23 @@ class Client(object):
         ret = self._client.query(timeout, query, json.dumps(params))
         self._raise_errors(ret)
         return ret["data"]["query"]
+
+    def get_username(self, unixname=None, timeout=10) -> str:
+        """Get a string suitable for ui.username, like "Foo bar <foobar@example.com>"."""
+        if unixname is None:
+            unixname = os.getenv("USER") or os.getenv("USERNAME")
+        if not unixname:
+            raise error.Abort(_("unknown unixname"))
+        query = "query($u: String!) { intern_user_for_unixname(unixname: $u) { access_name email } }"
+        params = {"u": unixname}
+        # {'data': {'intern_user_for_unixname': {'access_name': 'Name', 'email': 'foo@example.com'}}}
+        ret = self._client.query(timeout, query, json.dumps(params))
+        self._raise_errors(ret)
+        data = ret["data"]["intern_user_for_unixname"]
+        if not data:
+            raise error.Abort(_("no internal user for unixname '%s'") % unixname)
+        username = f"{data['access_name']} <{data['email']}>"
+        return username
 
     def _raise_errors(self, response):
         try:

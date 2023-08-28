@@ -131,7 +131,7 @@ def fastreadp1(repopath) -> Optional[bytes]:
         return None
 
 
-class dirstate(object):
+class dirstate:
     def __init__(
         self,
         opener: "vfs.abstractvfs",
@@ -620,7 +620,9 @@ class dirstate(object):
             raise error.Abort(
                 _("setting %r to other parent " "only allowed in merges") % f
             )
-        if f in self and self[f] == "n":
+
+        entry = self._map.get(f)
+        if entry is not None and entry[0] == "n" and entry[2] != -2:
             # merge-like
             self._addpath(f, "m", 0, -2, -1)
         else:
@@ -948,17 +950,11 @@ class dirstate(object):
                 files.append(fullpath)
         return files
 
-    class FallbackToPythonStatus(Exception):
-        pass
-
     def _ruststatus(
         self, match: matchmod.basematcher, ignored: bool, clean: bool, unknown: bool
     ) -> "scmutil.status":
-        if ignored:
-            raise self.FallbackToPythonStatus
-
         status = self._repo._rsrepo.workingcopy().status(
-            match, self._lastnormaltime, self._ui._rcfg
+            match, self._lastnormaltime, bool(ignored), self._ui._rcfg
         )
 
         if not unknown:
@@ -968,7 +964,11 @@ class dirstate(object):
             self._ui.warn(_("skipping invalid path %r\n") % invalid)
 
         self._add_clean_and_trigger_bad_matches(
-            match, status, self._repo[None].p1(), clean
+            match,
+            status,
+            self._repo[None].p1(),
+            clean,
+            pathutil.pathauditor(self._root, cached=True),
         )
 
         return status
@@ -981,10 +981,7 @@ class dirstate(object):
         dirstate and return a scmutil.status.
         """
         if self._ui.configbool("workingcopy", "ruststatus"):
-            try:
-                return self._ruststatus(match, ignored, clean, unknown)
-            except self.FallbackToPythonStatus:
-                pass
+            return self._ruststatus(match, ignored, clean, unknown)
 
         wctx = self._repo[None]
         # Prime the wctx._parents cache so the parent doesn't change out from
@@ -1050,7 +1047,7 @@ class dirstate(object):
 
         # Fetch the nonnormalset after iterating over pendingchanges, since the
         # iteration may change the nonnormalset as lookup states are resolved.
-        if util.safehasattr(dmap, "nonnormalsetfiltered"):
+        if hasattr(dmap, "nonnormalsetfiltered"):
             # treestate has a fast path to filter out ignored directories.
             ignorevisitdir: "Callable[[str], Union[str, bool]]" = ignore.visitdir
 
@@ -1167,7 +1164,9 @@ class dirstate(object):
 
         # Step 3: If clean files were requested, add those to the results
         # Step 4: Report any explicitly requested files that don't exist
-        self._add_clean_and_trigger_bad_matches(match, status, pctx, listclean)
+        self._add_clean_and_trigger_bad_matches(
+            match, status, pctx, listclean, auditpath
+        )
 
         # TODO: fire this inside filesystem. fixup is a list of files that
         # checklookup says are clean
@@ -1187,6 +1186,7 @@ class dirstate(object):
         status: scmutil.status,
         pctx: context.changectx,
         listclean: bool,
+        auditor: pathutil.pathauditor,
     ) -> None:
         seenset = set()
         for files in status:
@@ -1202,6 +1202,10 @@ class dirstate(object):
             seenset.update(clean)
 
         for path in sorted(match.files()):
+            # path can be "". Rust doesn't do this, so this "if" can go away later.
+            if path:
+                auditor(path)
+
             try:
                 st = os.lstat(os.path.join(self._root, path))
             except OSError as ex:
@@ -1432,7 +1436,7 @@ class dirstate(object):
         ui.log("dirstate_info", **data)
 
 
-class dirstatemap(object):
+class dirstatemap:
     """Map encapsulating the dirstate's contents.
 
     The dirstate contains the following state:
@@ -1718,7 +1722,7 @@ class dirstatemap(object):
         if not st:
             return
 
-        if util.safehasattr(parsers, "dict_new_presized"):
+        if hasattr(parsers, "dict_new_presized"):
             # Make an estimate of the number of files in the dirstate based on
             # its size. From a linear regression on a set of real-world repos,
             # all over 10,000 files, the size of a dirstate entry is 85

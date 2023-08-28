@@ -8,7 +8,7 @@
 import type {RepoRelativePath} from './types';
 import type {SetterOrUpdater} from 'recoil';
 import type {Hash, RepoPath} from 'shared/types/common';
-import type {ExportFile} from 'shared/types/stack';
+import type {ExportFile, ImportCommit} from 'shared/types/stack';
 
 import clientToServerAPI from './ClientToServerAPI';
 import {t} from './i18n';
@@ -17,7 +17,7 @@ import {clearOnCwdChange} from './recoilUtils';
 import {ChunkSelectState} from './stackEdit/chunkSelectState';
 import {assert} from './utils';
 import Immutable from 'immutable';
-import {useRecoilState, useRecoilValue, atom} from 'recoil';
+import {selector, useRecoilState, useRecoilValue, atom} from 'recoil';
 import {RateLimiter} from 'shared/RateLimiter';
 import {SelfUpdate} from 'shared/immutableExt';
 
@@ -151,6 +151,46 @@ export class PartialSelection extends SelfUpdate<PartialSelectionRecord> {
     return paths.every(p => this.getSimplifiedSelection(p) === false);
   }
 
+  /**
+   * Produce a `ImportStack['files']` useful for the `debugimportstack` command
+   * to create commits.
+   *
+   * `allPaths` provides extra file paths to be considered. This is useful
+   * when we only track "deselected files".
+   */
+  calculateImportStackFiles(
+    allPaths: Array<RepoRelativePath>,
+    inverse = false,
+  ): ImportCommit['files'] {
+    const files: ImportCommit['files'] = {};
+    // Process files in the fileMap. Note: this map might only contain the "deselected"
+    // files, depending on selectByDefault.
+    const fileMap = this.inner.fileMap;
+    fileMap.forEach((fileSelection, path) => {
+      if (fileSelection instanceof ChunkSelectState) {
+        const text = inverse ? fileSelection.getInverseText() : fileSelection.getSelectedText();
+        if (inverse || text !== fileSelection.a) {
+          // The file is edited. Use the changed content.
+          files[path] = {data: text, copyFrom: '.', flags: '.'};
+        }
+      } else if (fileSelection === true) {
+        // '.' can be used for both inverse = true and false.
+        // - For inverse = true, '.' is used with the 'write' debugimportstack command.
+        //   The 'write' command treats '.' as "working parent" to "revert" changes.
+        // - For inverse = false, '.' is used with the 'commit' or 'amend' debugimportstack
+        //   commands. They treat '.' as "working copy" to "commit/amend" changes.
+        files[path] = '.';
+      }
+    });
+    // Process files outside the fileMap.
+    allPaths.forEach(path => {
+      if (!fileMap.has(path) && this.getSimplifiedSelection(path) !== false) {
+        files[path] = '.';
+      }
+    });
+    return files;
+  }
+
   /** If any file is partially selected. */
   hasChunkSelection(): boolean {
     return this.inner.fileMap
@@ -203,8 +243,11 @@ export class UseUncommittedSelection {
   }
 
   /** Explicitly select a file. */
-  select(path: RepoRelativePath) {
-    const newSelection = this.selection.select(path);
+  select(...paths: Array<RepoRelativePath>) {
+    let newSelection = this.selection;
+    for (const path of paths) {
+      newSelection = newSelection.select(path);
+    }
     this.setSelection(newSelection);
   }
 
@@ -214,10 +257,13 @@ export class UseUncommittedSelection {
   }
 
   /** Explicitly deselect a file. Also drops the related file content cache. */
-  deselect(path: RepoRelativePath) {
+  deselect(...paths: Array<RepoRelativePath>) {
+    let newSelection = this.selection;
     const cache = UseUncommittedSelection.fileContentCache;
-    cache.files.delete(path);
-    const newSelection = this.selection.deselect(path);
+    for (const path of paths) {
+      cache.files.delete(path);
+      newSelection = newSelection.deselect(path);
+    }
     this.setSelection(newSelection);
   }
 
@@ -341,6 +387,8 @@ export class UseUncommittedSelection {
     this.setSelection(newSelection);
   }
 
+  // ---------- Read-only methods below ----------
+
   /**
    * Return true if a file is selected (default), false if deselected,
    * or a string with the edited content.
@@ -378,6 +426,21 @@ export class UseUncommittedSelection {
   }
 }
 
+type OmitNotMatching<T, K> = {
+  [P in keyof T]: K extends P ? T[P] : never;
+};
+type ReadonlyPartialSelection = OmitNotMatching<
+  PartialSelection,
+  | 'getSelection'
+  | 'isFullyOrPartiallySelected'
+  | 'isPartiallySelected'
+  | 'isFullySelected'
+  | 'isDeselected'
+  | 'isEverythingSelected'
+  | 'isNothingSelected'
+  | 'hasChunkSelection'
+>;
+
 /** Get the uncommitted selection state. */
 export function useUncommittedSelection() {
   const [selection, setSelection] = useRecoilState(uncommittedSelection);
@@ -388,6 +451,17 @@ export function useUncommittedSelection() {
 
   return new UseUncommittedSelection(selection, setSelection, wdirHash, getPaths);
 }
+
+/** Get a readonly view of the selection state, accessible from a snapshot / outside of react hooks */
+export const uncommittedSelectionReadonly = selector<ReadonlyPartialSelection>({
+  key: 'uncommittedSelectionReadonly',
+  cachePolicy_UNSTABLE: {eviction: 'most-recent'},
+  get: ({get}) => {
+    const selection = get(uncommittedSelection);
+    // Return the selection exactly, but modify the type to discourage using non-readonly methods.
+    return selection as ReadonlyPartialSelection;
+  },
+});
 
 function mergeObjectToMap<V>(obj: {[path: string]: V} | undefined, map: Map<string, V>) {
   if (obj === undefined) {

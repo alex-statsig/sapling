@@ -79,6 +79,7 @@ metaconfig_types = { version = "0.1.0", path = "metaconfig/types" }
 mononoke_app = { version = "0.1.0", path = "cmdlib/mononoke_app" }
 mononoke_types = { version = "0.1.0", path = "mononoke_types" }
 packblob = { version = "0.1.0", path = "blobstore/packblob" }
+regex = "1.9.2"
 repo_blobstore = { version = "0.1.0", path = "blobrepo/repo_blobstore" }
 repo_derived_data = { version = "0.1.0", path = "repo_attributes/repo_derived_data" }
 repo_identity = { version = "0.1.0", path = "repo_attributes/repo_identity" }
@@ -86,18 +87,19 @@ retry = { version = "0.1.0", path = "common/retry" }
 revset = { version = "0.1.0", path = "revset" }
 scuba_ext = { version = "0.1.0", path = "common/scuba_ext" }
 segmented_changelog = { version = "0.1.0", path = "segmented_changelog" }
-serde = { version = "1.0.167", features = ["derive", "rc"] }
-serde_derive = "1.0.167"
+serde = { version = "1.0.185", features = ["derive", "rc"] }
+serde_derive = "1.0.185"
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
 sql_construct = { version = "0.1.0", path = "common/sql_construct" }
 sql_ext = { version = "0.1.0", path = "common/rust/sql_ext" }
 sqlblob = { version = "0.1.0", path = "blobstore/sqlblob" }
 streaming_clone = { version = "0.1.0", path = "repo_client/streaming_clone" }
-tokio = { version = "1.25.0", features = ["full", "test-util", "tracing"] }
+tokio = { version = "1.29.1", features = ["full", "test-util", "tracing"] }
 toml = "0.7.3"
 
 [patch.crates-io]
 abomonation = { git = "https://github.com/markbt/abomonation", rev = "0f43346d2afa2aedc64d61f3f4273e8d1e454642" }
+base64urlsafedata = { git = "https://github.com/kanidm/webauthn-rs.git", rev = "d4b418487ff7726464549b43bf850509694c3e74" }
 curve25519-dalek = { git = "https://github.com/hariria/curve25519-dalek", rev = "1f39e7b369dc70f432370c9703229a45bfa9664e" }
 dachshund = { git = "https://github.com/facebookresearch/dachshund", rev = "ec4cc35bc5afb0db5f791ee9e3168e7586986c88" }
 graphql-parser = { git = "https://github.com/graphql-rust//graphql-parser", rev = "8d76425d83c40670570cc325f57c730262f07456" }
@@ -106,7 +108,6 @@ mysql_async = { git = "https://github.com/mzr/mysql_async", rev = "76b6fa05d7bb3
 perf-event = { version = "0.4", git = "https://github.com/krallin/perf-event.git", rev = "86224a9bc025d5d19f719542f27c8c629a08b167" }
 perf-event-open-sys = { version = "4.0", git = "https://github.com/krallin/perf-event.git", rev = "86224a9bc025d5d19f719542f27c8c629a08b167" }
 quickcheck = { git = "https://github.com/jakoschiko/quickcheck", rev = "6ecdf5bb4b0132ce66670b4d46453aa022ea892c" }
-tar = { package = "tar", git = "https://github.com/jrwats/tar-rs.git", rev = "21eeccdc08d9b87f6ad610f9b20a5839aabe5974" }
 terminfo = { git = "https://github.com/rust-terminfo/terminfo", rev = "9b4e1c6aae79644c9da7a2e312e3c10ee4759930" }
 tracing = { git = "https://github.com/fbsource/tracing.git", rev = "3399637795795560a073fc60a2e6cfa67b8421f1" }
 tracing-appender = { git = "https://github.com/fbsource/tracing.git", rev = "3399637795795560a073fc60a2e6cfa67b8421f1" }
@@ -148,12 +149,14 @@ members = [
   "blobstore/factory",
   "blobstore/fileblob",
   "blobstore/if",
+  "blobstore/if/types",
   "blobstore/logblob",
   "blobstore/memblob",
   "blobstore/multiplexedblob",
   "blobstore/multiplexedblob_wal",
   "blobstore/packblob",
   "blobstore/packblob/if",
+  "blobstore/packblob/if/types",
   "blobstore/prefixblob",
   "blobstore/readonlyblob",
   "blobstore/redactedblobstore",
@@ -169,10 +172,13 @@ members = [
   "bonsai_globalrev_mapping",
   "bonsai_globalrev_mapping/globalrev_pushrebase_hook",
   "bonsai_globalrev_mapping/if",
+  "bonsai_globalrev_mapping/if/types",
   "bonsai_hg_mapping",
   "bonsai_hg_mapping/if",
+  "bonsai_hg_mapping/if/types",
   "bonsai_svnrev_mapping",
   "bonsai_svnrev_mapping/if",
+  "bonsai_svnrev_mapping/if/types",
   "bonsai_tag_mapping",
   "bookmarks",
   "bookmarks/bookmarks_movement",
@@ -186,6 +192,7 @@ members = [
   "changesets/changesets_creation",
   "changesets/changesets_impl",
   "changesets/if",
+  "changesets/if/types",
   "cmdlib",
   "cmdlib/base_app",
   "cmdlib/caching",
@@ -247,6 +254,7 @@ members = [
   "derived_data/blame",
   "derived_data/changeset_info",
   "derived_data/changeset_info/if",
+  "derived_data/changeset_info/if/types",
   "derived_data/constants",
   "derived_data/deleted_manifest",
   "derived_data/fastlog",
@@ -256,6 +264,7 @@ members = [
   "derived_data/mercurial_derivation",
   "derived_data/remote",
   "derived_data/remote/if",
+  "derived_data/remote/if/types",
   "derived_data/skeleton_manifest",
   "derived_data/test/generation_derivation",
   "derived_data/test_utils",
@@ -267,14 +276,19 @@ members = [
   "features/repo_update_logger",
   "filenodes",
   "filenodes/if",
+  "filenodes/if/types",
   "filestore",
   "git/check_git_wc",
   "git/git-pool",
   "git/git_types",
   "git/git_types/if",
+  "git/git_types/if/types",
+  "git/gitexport",
   "git/gitimport",
   "git/import_direct",
   "git/import_tools",
+  "git/packfile",
+  "git_symbolic_refs",
   "gotham_ext",
   "hgproto",
   "hooks",
@@ -289,6 +303,7 @@ members = [
   "megarepo_api/commit_transformation",
   "megarepo_api/configo_client",
   "megarepo_api/if",
+  "megarepo_api/if/types",
   "megarepo_api/mapping",
   "megarepo_api/megarepo_config",
   "megarepo_api/megarepo_error",
@@ -296,15 +311,18 @@ members = [
   "mercurial/bundles",
   "mercurial/mutation",
   "mercurial/mutation/if",
+  "mercurial/mutation/if/types",
   "mercurial/revlog",
   "mercurial/types",
   "mercurial/types/if",
+  "mercurial/types/if/types",
   "mercurial/types/mocks",
   "metaconfig/parser",
   "metaconfig/types",
   "microwave",
   "microwave/builder",
   "microwave/if",
+  "microwave/if/types",
   "mononoke_api",
   "mononoke_api/types",
   "mononoke_api_hg",
@@ -313,10 +331,12 @@ members = [
   "mononoke_repos",
   "mononoke_types",
   "mononoke_types/if",
+  "mononoke_types/if/types",
   "mononoke_types/mocks",
   "mutable_counters",
   "mutable_renames",
   "mutable_renames/if",
+  "mutable_renames/if/types",
   "newfilenodes",
   "observability",
   "permission_checker",
@@ -336,6 +356,7 @@ members = [
   "repo_attributes/commit_graph/commit_graph_testlib",
   "repo_attributes/commit_graph/commit_graph_types",
   "repo_attributes/commit_graph/commit_graph_types/if",
+  "repo_attributes/commit_graph/commit_graph_types/if/types",
   "repo_attributes/commit_graph/in_memory_commit_graph_storage",
   "repo_attributes/commit_graph/preloaded_commit_graph_storage",
   "repo_attributes/commit_graph/sql_commit_graph_storage",
@@ -363,6 +384,7 @@ members = [
   "revset",
   "revset/revset-test-helper",
   "scs/if",
+  "scs/if/types",
   "segmented_changelog",
   "segmented_changelog/bench/concurrent_idmap",
   "segmented_changelog/types",

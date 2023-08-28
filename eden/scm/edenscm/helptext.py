@@ -763,56 +763,6 @@ below can be referred as ``{listupfiles}``::
     Number of seconds for which connections in the connection pool can be kept
     and reused.  Connections that are older than this won't be reused.
 
-``decode/encode``
------------------
-
-Filters for transforming files on checkout/checkin. This would
-typically be used for newline processing or other
-localization/canonicalization of files.
-
-Filters consist of a filter pattern followed by a filter command.
-Filter patterns are globs by default, rooted at the repository root.
-For example, to match any file ending in ``.txt`` in the root
-directory only, use the pattern ``*.txt``. To match any file ending
-in ``.c`` anywhere in the repository, use the pattern ``**.c``.
-For each file only the first matching filter applies.
-
-The filter command can start with a specifier, either ``pipe:`` or
-``tempfile:``. If no specifier is given, ``pipe:`` is used by default.
-
-A ``pipe:`` command must accept data on stdin and return the transformed
-data on stdout.
-
-Pipe example::
-
-  [encode]
-  # uncompress gzip files on checkin to improve delta compression
-  # note: not necessarily a good idea, just an example
-  *.gz = pipe: gunzip
-
-  [decode]
-  # recompress gzip files when writing them to the working dir (we
-  # can safely omit "pipe:", because it's the default)
-  *.gz = gzip
-
-A ``tempfile:`` command is a template. The string ``INFILE`` is replaced
-with the name of a temporary file that contains the data to be
-filtered by the command. The string ``OUTFILE`` is replaced with the name
-of an empty temporary file, where the filtered data must be written by
-the command.
-
-.. container:: windows
-
-   .. note::
-
-     The tempfile mechanism is recommended for Windows systems,
-     where the standard shell I/O redirection operators often have
-     strange effects and may corrupt the contents of your files.
-
-This filter mechanism is used internally by the ``eol`` extension to
-translate line ending characters between Windows (CRLF) and Unix (LF)
-format. We suggest you use the ``eol`` extension for convenience.
-
 
 ``defaults``
 ------------
@@ -1330,6 +1280,11 @@ be ``$HG_HOOKTYPE=incoming`` and ``$HG_HOOKNAME=incoming.email``.
    hooks on platforms such as Windows. As an example, ``$HG_PARENT2``
    will have an empty value under Unix-like platforms for non-merge
    changesets, while it will not be available at all under Windows.
+
+.. note::
+
+    A hook can start with ``background:``. It will be spawned in the
+    background and its result will be discarded.
 
 The syntax for Python hooks is as follows::
 
@@ -2778,15 +2733,16 @@ HGMERGE
     (deprecated, see :prog:`help config.ui.merge`)
 
 HGRCPATH
-    A list of files or directories to search for configuration
-    files. Item separator is ":" on Unix, ";" on Windows. If HGRCPATH
+    A list of files to search for configuration files.
+    Item separator is ":" on Unix, ";" on Windows. If HGRCPATH
     is not set, platform default search path is used. If empty, only
     the current repository config is read.
 
-    For each element in HGRCPATH:
-
-    - if it's a directory, all files ending with .rc are added
-    - otherwise, the file itself will be added
+    Each element in HGRCPATH could start with an optional prefix
+    "sys=" or "user=" to specify whether it's considered as a system
+    or user config file. A special "sys=." or "user=." indicates
+    reusing the existing system or user config paths. Paths without
+    "sys=" or or "user=" prefixes are considered as system configs.
 
 HGPLAIN
     When set, this disables any configuration settings that might

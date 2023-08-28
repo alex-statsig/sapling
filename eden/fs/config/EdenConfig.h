@@ -12,9 +12,6 @@
 #include <optional>
 #include <vector>
 
-#include <folly/portability/SysStat.h>
-#include <folly/portability/SysTypes.h>
-#include <folly/portability/Unistd.h>
 #include <thrift/lib/cpp/concurrency/ThreadManager.h>
 
 #include "common/rust/shed/hostcaps/hostcaps.h"
@@ -23,6 +20,7 @@
 #include "eden/fs/config/ConfigVariables.h"
 #include "eden/fs/config/FileChangeMonitor.h"
 #include "eden/fs/config/HgObjectIdFormat.h"
+#include "eden/fs/config/InodeCatalogType.h"
 #include "eden/fs/config/MountProtocol.h"
 #include "eden/fs/config/ReaddirPrefetch.h"
 #include "eden/fs/eden-config.h"
@@ -281,9 +279,10 @@ class EdenConfig : private ConfigSettingManager {
       "ssl:client-certificate",
       kUnspecifiedDefault,
       this};
-  ConfigSetting<std::vector<AbsolutePath>> clientCertificateLocations{
+
+  ConfigSetting<std::vector<std::string>> clientCertificateLocations{
       "ssl:client-certificate-locations",
-      std::vector<AbsolutePath>{},
+      std::vector<std::string>{},
       this};
 
   ConfigSetting<bool> useMononoke{"mononoke:use-mononoke", false, this};
@@ -897,14 +896,6 @@ class EdenConfig : private ConfigSettingManager {
   // [experimental]
 
   /**
-   * Controls whether interrupted checkouts can be resumed.
-   */
-  ConfigSetting<bool> allowResumeCheckout{
-      "experimental:allow-resume-checkout",
-      true,
-      this};
-
-  /**
    * Controls whether EdenFS detects proceses that crawl an NFS checkout. Only
    * affects EdenFS if experimental:enable-nfs-server is also true. When NFS
    * crawl detection is enabled, EdenFS will perioically check
@@ -1153,6 +1144,15 @@ class EdenConfig : private ConfigSettingManager {
   // [overlay]
 
   /**
+   * The `InodeCatalogType` to use when creating new `Overlay`s, unless
+   * specified by parameter during creation via CLI or otherwise.
+   */
+  ConfigSetting<InodeCatalogType> inodeCatalogType{
+      "overlay:inode-catalog-type",
+      kInodeCatalogTypeDefault,
+      this};
+
+  /**
    * DANGER: this option will put overlay into memory and skip persisting any
    * actual data to disk. This will guarantee to cause EdenFS corruption after
    * restart. Use with caution.
@@ -1227,14 +1227,6 @@ class EdenConfig : private ConfigSettingManager {
    * Should FSCK be run on multiple threads, or serialized.
    */
   ConfigSetting<bool> multiThreadedFsck{"fsck:multi-threaded", true, this};
-
-  /**
-   * Should `eden fsck` use the Python or C++ implementation
-   */
-  ConfigSetting<bool> useCppImplementation{
-      "fsck:use-cpp-implementation",
-      false,
-      this};
 
   // [glob]
 

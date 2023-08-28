@@ -11,6 +11,8 @@ use std::fmt::Debug;
 use std::fs::create_dir_all;
 use std::future::ready;
 use std::num::NonZeroU64;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -229,6 +231,12 @@ impl Client {
         }
 
         if let Some(ref correlator) = config.correlator {
+            // Also send correlator to telemetry. Usually it's just the edenapi
+            // DEFAULT_CORRELATOR so we just send it once.
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.fetch_or(true, Ordering::AcqRel) {
+                tracing::debug!(target: "clienttelemetry", client_correlator=config.correlator);
+            }
             req.set_header("X-Client-Correlator", correlator);
         }
 
@@ -452,7 +460,10 @@ impl Client {
         let mut url = self.build_url(paths::FILES2)?;
 
         if self.config().try_route_consistently && keys.len() == 1 {
-            url.set_query(Some(&format!("routing_file={}", keys.first().unwrap())));
+            url.set_query(Some(&format!(
+                "routing_file={}",
+                keys.first().unwrap().hgid
+            )));
             tracing::debug!("Requesting file with a routing key: {}", url);
         }
 
@@ -479,7 +490,10 @@ impl Client {
         let mut url = self.build_url(paths::TREES)?;
 
         if self.config().try_route_consistently && keys.len() == 1 {
-            url.set_query(Some(&format!("routing_tree={}", keys.first().unwrap())));
+            url.set_query(Some(&format!(
+                "routing_tree={}",
+                keys.first().unwrap().hgid
+            )));
             tracing::debug!("Requesting tree with a routing key: {}", url);
         }
 
@@ -509,7 +523,10 @@ impl Client {
 
         let mut url = self.build_url(paths::FILES2)?;
         if self.config().try_route_consistently && reqs.len() == 1 {
-            url.set_query(Some(&format!("routing_file={}", reqs.first().unwrap().key)));
+            url.set_query(Some(&format!(
+                "routing_file={}",
+                reqs.first().unwrap().key.hgid
+            )));
             tracing::debug!("Requesting file with a routing key: {}", url);
         }
 
@@ -685,7 +702,16 @@ impl EdenApi for Client {
             return Ok(Response::empty());
         }
 
-        let url = self.build_url(paths::HISTORY)?;
+        let mut url = self.build_url(paths::HISTORY)?;
+
+        if self.config().try_route_consistently && keys.len() == 1 {
+            url.set_query(Some(&format!(
+                "routing_file={}",
+                keys.first().unwrap().hgid
+            )));
+            tracing::debug!("Requesting history for 1 file with a routing key: {}", url);
+        }
+
         let requests = self.prepare_requests(&url, keys, self.config().max_history, |keys| {
             let req = HistoryRequest { keys, length };
             self.log_request(&req, "history");

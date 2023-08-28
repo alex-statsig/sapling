@@ -2,7 +2,6 @@
 #inprocess-hg-incompatible
 
   $ configure dummyssh
-  $ setconfig workingcopy.ruststatus=false
 #require serve
 
 Initialize repository
@@ -16,14 +15,14 @@ the status call is to check for issue5130
   ...     with open(str(i), 'w') as fh:
   ...         x = fh.write("%s" % (str(i),))
   $ hg -q commit -A -m 'add a lot of files'
-  $ hg st --config status.use-rust=false
+  $ hg st
   $ cd ..
 
 Basic clone
 
   $ hg clone --stream -U ssh://user@dummy/server clone1
   streaming all changes
-  1025 files to transfer, * of data (glob)
+  * (glob)
   transferred * in * seconds (*) (glob)
   requesting all changes
   adding changesets
@@ -36,12 +35,12 @@ Clone with background file closing enabled
   running * 'user@dummy' 'hg -R server serve --stdio' (glob)
   sending hello command
   sending between command
-  remote: 448
-  remote: capabilities: lookup changegroupsubset branchmap pushkey known getbundle unbundlehash unbundlereplay batch streamreqs=generaldelta,lz4revlog,revlogv1 stream_option $USUAL_BUNDLE2_CAPS$%0Atreemanifest%3DTrue%0Atreeonly%3DTrue unbundle=HG10GZ,HG10BZ,HG10UN
+  remote: 438
+  remote: capabilities: lookup changegroupsubset branchmap pushkey known getbundle unbundlehash unbundlereplay batch streamreqs=generaldelta,revlogv1 stream_option $USUAL_BUNDLE2_CAPS$%0Atreemanifest%3DTrue%0Atreeonly%3DTrue unbundle=HG10GZ,HG10BZ,HG10UN
   remote: 1
   streaming all changes
   sending stream_out_option command
-  1025 files to transfer, * of data (glob)
+  * (glob)
   transferred * in * seconds (*) (glob)
   query 1; heads
   sending batch command

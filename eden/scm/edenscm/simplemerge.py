@@ -28,10 +28,6 @@ from .i18n import _
 from .pycompat import range
 
 
-class CantReprocessAndShowBase(Exception):
-    pass
-
-
 def intersect(ra, rb):
     """Given two ranges return the range where they intersect or None.
 
@@ -62,15 +58,14 @@ def compare_range(a, astart, aend, b, bstart, bend):
     for ia, ib in zip(range(astart, aend), range(bstart, bend)):
         if a[ia] != b[ib]:
             return False
-    else:
-        return True
+    return True
 
 
 class CantShowWordConflicts(Exception):
     pass
 
 
-class wordmergemode(object):
+class wordmergemode:
     enforced = "enforced"  # Enforced word merge. Cannot draw conflict regions.
     ondemand = "ondemand"  # Try line merge first. Only use word merge if it can solve conflicts.
     disabled = "disabled"  # Do not ever attempt to do word merge.
@@ -115,7 +110,7 @@ def splitwordswithoutemptylines(text):
     return result
 
 
-class Merge3Text(object):
+class Merge3Text:
     """3-way merge of texts.
 
     Given strings BASE, OTHER, THIS, tries to produce a combined text
@@ -147,7 +142,6 @@ class Merge3Text(object):
         minimize=False,
     ):
         """Return merge in cvs-like form."""
-        self.conflicts = False
         self.conflictscount = 0
         newline = b"\n"
         if len(self.a) > 0:
@@ -183,8 +177,8 @@ class Merge3Text(object):
                     for i in range(t[5], t[6]):
                         yield self.b[i]
                 else:
-                    self.conflicts = True
                     if self.wordmerge is wordmergemode.enforced:
+                        self.conflictscount += 1
                         raise CantShowWordConflicts()
                     elif self.wordmerge is wordmergemode.ondemand:
                         # Try resolve the conflicted region using word merge
@@ -196,6 +190,12 @@ class Merge3Text(object):
                             for line in text.splitlines(True):
                                 yield line
                             continue
+
+                    if (merged_lines := self.resolve_conflict_region(t)) is not None:
+                        for line in merged_lines:
+                            yield line
+                        continue
+
                     self.conflictscount += 1
                     if start_marker is not None:
                         yield start_marker + newline
@@ -213,6 +213,13 @@ class Merge3Text(object):
                         yield end_marker + newline
             else:
                 raise ValueError(what)
+
+    def resolve_conflict_region(self, conflict_region):
+        """Try automerge algorithms to resolve the conflict region.
+
+        Return resolved lines, or None if auto resolution failed.
+        """
+        return None
 
     def merge_groups(self):
         """Yield sequence of line groups.  Each one is a tuple:
@@ -580,7 +587,7 @@ def simplemerge(ui, localctx, basectx, otherctx, **opts):
         # Maintain that behavior today for BC, though perhaps in the future
         # it'd be worth considering whether merging encoded data (what the
         # repository usually sees) might be more useful.
-        return _verifytext(ctx.decodeddata(), ctx.path(), ui, opts)
+        return _verifytext(ctx.data(), ctx.path(), ui, opts)
 
     mode = opts.get("mode", "merge")
     name_a, name_b, name_base = None, None, None
@@ -612,7 +619,7 @@ def simplemerge(ui, localctx, basectx, otherctx, **opts):
         lines, conflicts = _mergediff(m3, name_a, name_b, name_base)
     else:
         lines = list(m3.merge_lines(name_a=name_a, name_b=name_b, **extrakwargs))
-        conflicts = m3.conflicts
+        conflicts = bool(m3.conflictscount)
     mergedtext = b"".join(lines)
     if opts.get("print"):
         ui.fout.write(mergedtext)

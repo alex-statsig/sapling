@@ -351,12 +351,14 @@ def keyvaluepair(repo, subset, k, v, order):
     raise error.ParseError(_("can't use a key-value pair in this context"))
 
 
-def oldworkingcopyparentset(repo, subset, x, order):
-    # "oldworkingcopyparent" revset func is defined in undo extension
-    func = symbols.get("oldworkingcopyparent")
+def oldnonobsworkingcopyparentset(repo, subset, x, order):
+    func = symbols.get("oldnonobsworkingcopyparent")
     if func is None:
         raise error.ParseError(
-            _("please enable 'undo' extension to use '-' as old working copy parent")
+            _(
+                "please enable 'undo' extension to use '-' as old non-obsolete "
+                "working copy parent"
+            )
         )
     else:
         return func(repo, subset, x)
@@ -712,7 +714,7 @@ def bsearch(repo, subset, x):
     # NOTE: Remove BisectArray and use `key=` provided by Python 3.10
     # once Python 3.10 is used.
 
-    class BisectArray(object):
+    class BisectArray:
         def __init__(self, array, keyfunc):
             self.array = array
             self.keyfunc = keyfunc
@@ -1271,69 +1273,6 @@ def _followfirst(repo, subset, x):
     # Like ``follow([file[, startrev]])`` but follows only the first parent
     # of every revisions or files revisions.
     return _follow(repo, subset, x, "_followfirst", followfirst=True)
-
-
-@predicate("followlines(file, fromline:toline[, startrev=., descend=False])", safe=True)
-def followlines(repo, subset, x):
-    """Changesets modifying `file` in line range ('fromline', 'toline').
-
-    Line range corresponds to 'file' content at 'startrev' and should hence be
-    consistent with file size. If startrev is not specified, working directory's
-    parent is used.
-
-    By default, ancestors of 'startrev' are returned. If 'descend' is True,
-    descendants of 'startrev' are returned though renames are (currently) not
-    followed in this direction.
-    """
-    args = getargsdict(x, "followlines", "file *lines startrev descend")
-    if len(args["lines"]) != 1:
-        raise error.ParseError(_("followlines requires a line range"))
-
-    rev = "."
-    if "startrev" in args:
-        revs = getset(repo, fullreposet(repo), args["startrev"])
-        if len(revs) != 1:
-            raise error.ParseError(
-                # i18n: "followlines" is a keyword
-                _("followlines expects exactly one revision")
-            )
-        rev = revs.last()
-
-    pat = getstring(args["file"], _("followlines requires a pattern"))
-    # i18n: "followlines" is a keyword
-    msg = _("followlines expects exactly one file")
-    fname = scmutil.parsefollowlinespattern(repo, rev, pat, msg)
-    # i18n: "followlines" is a keyword
-    lr = getrange(args["lines"][0], _("followlines expects a line range"))
-    fromline, toline = [
-        getinteger(a, _("line range bounds must be integers")) for a in lr
-    ]
-    fromline, toline = util.processlinerange(fromline, toline)
-
-    fctx = repo[rev].filectx(fname)
-    descend = False
-    if "descend" in args:
-        descend = getboolean(
-            args["descend"],
-            # i18n: "descend" is a keyword
-            _("descend argument must be a boolean"),
-        )
-    if descend:
-        rs = generatorset(
-            (
-                c.rev()
-                for c, _linerange in dagop.blockdescendants(fctx, fromline, toline)
-            ),
-            iterasc=True,
-            repo=repo,
-        )
-    else:
-        rs = generatorset(
-            (c.rev() for c, _linerange in dagop.blockancestors(fctx, fromline, toline)),
-            iterasc=False,
-            repo=repo,
-        )
-    return subset & rs
 
 
 @predicate("_pathhistory(set, paths...)", safe=True, weight=20)
@@ -2655,7 +2594,7 @@ methods = {
     "ancestor": ancestorspec,
     "parent": parentspec,
     "parentpost": parentpost,
-    "oldworkingcopyparent": oldworkingcopyparentset,
+    "oldnonobsworkingcopyparent": oldnonobsworkingcopyparentset,
 }
 
 

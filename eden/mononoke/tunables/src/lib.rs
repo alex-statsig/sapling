@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::thread_local;
-use std::time::Duration;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -67,14 +66,15 @@ pub fn tunables() -> TunablesReference {
 // These types exist to simplify code generation in tunables-derive
 pub type TunableBool = ArcSwapOption<bool>;
 pub type TunableI64 = ArcSwapOption<i64>;
-
+pub type TunableU64 = ArcSwapOption<u64>;
 pub type TunableString = ArcSwapOption<String>;
 pub type TunableVecOfStrings = ArcSwapOption<Vec<String>>;
 
 pub type TunableBoolByRepo = ArcSwap<HashMap<String, bool>>;
+pub type TunableI64ByRepo = ArcSwap<HashMap<String, i64>>;
+pub type TunableU64ByRepo = ArcSwap<HashMap<String, u64>>;
 pub type TunableStringByRepo = ArcSwap<HashMap<String, String>>;
 pub type TunableVecOfStringsByRepo = ArcSwap<HashMap<String, Vec<String>>>;
-pub type TunableI64ByRepo = ArcSwap<HashMap<String, i64>>;
 
 #[derive(Tunables, Default, Debug)]
 pub struct MononokeTunables {
@@ -89,8 +89,6 @@ pub struct MononokeTunables {
     bookmark_subscription_max_age_ms: TunableI64,
     bookmark_subscription_protect_master: TunableBool,
     max_scuba_msg_length: TunableI64,
-    wishlist_read_qps: TunableI64,
-    wishlist_write_qps: TunableI64,
     edenapi_large_tree_metadata_limit: TunableI64,
     edenapi_req_dumper_sample_ratio: TunableI64,
     command_monitor_interval: TunableI64,
@@ -117,7 +115,6 @@ pub struct MononokeTunables {
     // When false error logs are never sampled
     scs_error_log_sampling: TunableBool,
     redacted_logging_sampling_rate: TunableI64,
-    redaction_config_from_xdb: TunableBool,
     repo_client_bookmarks_timeout_secs: TunableI64,
     repo_client_clone_timeout_secs: TunableI64,
     repo_client_default_timeout_secs: TunableI64,
@@ -196,34 +193,33 @@ pub struct MononokeTunables {
     all_derived_data_disabled: TunableBoolByRepo,
     derived_data_types_disabled: TunableVecOfStringsByRepo,
     // How often to check if derived data is disabled or not
-    derived_data_disabled_watcher_delay_secs: TunableI64,
+    derived_data_disabled_watcher_delay_secs: TunableU64,
 
     // Stops deriving on derivation workers. Will not drain Derivation Queue
     derived_data_disable_derivation_workers: TunableBool,
 
     // How long to wait before worker retries in case of an error
-    // or empty Derivation queue.
-    derivation_worker_sleep_duration: TunableI64,
+    // or empty Derivation queue (ms).
+    derivation_worker_sleep_duration: TunableU64,
 
-    // How long client should wait between polls of Derived data service
-    derivation_request_retry_delay: TunableI64,
+    // How long client should wait between polls of Derived data service (ms)
+    derivation_request_retry_delay: TunableU64,
 
     // Sets the size of the batch for derivaiton.
     derivation_batch_size: TunableI64,
 
     // Maximum time to wait for remote derivation request to finish in secs
     // before falling back to local derivation
-    remote_derivation_fallback_timeout_secs: TunableI64,
+    remote_derivation_fallback_timeout_secs: TunableU64,
+
+    // Allow fallback to local derivation if remote derivation failed.
+    remote_derivation_fallback_enabled: TunableBool,
 
     // Timeout for derivation request on service.
-    dds_request_timeout: TunableI64,
+    dds_request_timeout: TunableU64,
 
     // Disable the parallel derivation for DM and default to serial
     deleted_manifest_disable_new_parallel_derivation: TunableBool,
-
-    // multiplexed blobstore is_present/get new semantics rollout
-    multiplex_blobstore_get_do_queue_lookup: TunableBool,
-    multiplex_blobstore_is_present_do_queue_lookup: TunableBool,
 
     // Not in use.
     // TODO(mitrandir): clean it up
@@ -393,6 +389,14 @@ pub struct MononokeTunables {
 
     // Skip backsyncing for empty commits (except mapping changes via extras and merges)
     cross_repo_skip_backsyncing_ordinary_empty_commits: TunableBoolByRepo,
+
+    // Assigning global revs with small gaps
+    global_rev_increment_with_gaps: TunableBool,
+
+    // During cross-repo sync, mark a generated changeset as created by lossy conversion if it is
+    // See [this post](https://fburl.com/workplace/l5job9po) for context
+    // The repo it is tuned by refers to the source repo in the sync
+    cross_repo_mark_changesets_as_created_by_lossy_conversion: TunableBoolByRepo,
 }
 
 fn log_tunables(tunables: &TunablesStruct) -> String {
@@ -544,16 +548,6 @@ pub fn override_tunables(new_tunables: Option<Arc<MononokeTunables>>) {
     TUNABLES_OVERRIDE.with(|t| *t.borrow_mut() = new_tunables);
 }
 
-/// Get a duration from a tunable or a provided default
-/// value if the tunable is not set.
-pub fn get_duration_from_tunable_or(
-    get_tunable: impl Fn(&MononokeTunables) -> Option<i64>,
-    into_duration: impl Fn(u64) -> Duration,
-    default: u64,
-) -> Duration {
-    into_duration(get_tunable(tunables().deref()).map_or(default, |i| i as u64))
-}
-
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
@@ -566,6 +560,7 @@ mod test {
     struct TestTunables {
         boolean: TunableBool,
         num: TunableI64,
+        unum: TunableU64,
         string: TunableString,
         vecofstrings: TunableVecOfStrings,
 
@@ -574,6 +569,7 @@ mod test {
 
         repoint: TunableI64ByRepo,
         repoint2: TunableI64ByRepo,
+        repouint: TunableU64ByRepo,
 
         repostr: TunableStringByRepo,
         repostr2: TunableStringByRepo,
@@ -590,28 +586,30 @@ mod test {
 
     #[test]
     fn test_override_tunables() {
-        assert!(tunables().wishlist_write_qps().is_none());
+        assert!(tunables().warm_bookmark_cache_poll_interval_ms().is_none());
 
         let res = with_tunables(
             MononokeTunables {
-                wishlist_write_qps: ArcSwapOption::from(Some(Arc::new(2))),
+                warm_bookmark_cache_poll_interval_ms: ArcSwapOption::from(Some(Arc::new(2))),
                 ..MononokeTunables::default()
             },
-            || tunables().wishlist_write_qps().unwrap_or_default(),
+            || {
+                tunables()
+                    .warm_bookmark_cache_poll_interval_ms()
+                    .unwrap_or_default()
+            },
         );
 
         assert_eq!(res, 2);
-        assert!(tunables().wishlist_write_qps().is_none());
+        assert!(tunables().warm_bookmark_cache_poll_interval_ms().is_none());
     }
 
     #[test]
     fn test_empty_tunables() {
-        let bools = HashMap::new();
-        let ints = HashMap::new();
         let empty = EmptyTunables::default();
 
-        empty.update_bools(&bools);
-        empty.update_ints(&ints);
+        empty.update_bools(&HashMap::new());
+        empty.update_ints(&HashMap::new());
         empty.update_strings(&HashMap::new());
         empty.update_vec_of_strings(&HashMap::new());
     }
@@ -643,11 +641,13 @@ mod test {
 
         // ints
         let test = TestTunables::default();
-        test.update_ints(&hashmap! { s("num") => 1});
-        assert_eq!(test.num(), Some(1));
+        test.update_ints(&hashmap! { s("num") => 1, s("unum") => 2});
+        assert_eq!(test.num(), Some(1i64));
+        assert_eq!(test.unum(), Some(2u64));
 
         test.update_ints(&hashmap! {});
         assert_eq!(test.num(), None);
+        assert_eq!(test.unum(), None);
 
         // strings
         let test = TestTunables::default();
@@ -681,11 +681,16 @@ mod test {
     fn test_update_int() {
         let mut d = HashMap::new();
         d.insert(s("num"), 10);
+        // We store very large unsigned numbers as their bit-wise signed
+        // equivalent, so a value like `u64::MAX` will be stored as -1.
+        d.insert(s("unum"), -1);
 
         let test = TestTunables::default();
         assert!(test.num().is_none());
+        assert!(test.unum().is_none());
         test.update_ints(&d);
         assert_eq!(test.num(), Some(10));
+        assert_eq!(test.unum(), Some(u64::MAX));
     }
 
     #[test]
@@ -695,8 +700,10 @@ mod test {
 
         let test = TestTunables::default();
         assert!(test.num().is_none());
+        assert!(test.unum().is_none());
         test.update_ints(&d);
         assert!(test.num().is_none());
+        assert!(test.unum().is_none());
     }
 
     #[test]
@@ -937,6 +944,57 @@ mod test {
     }
 
     #[test]
+    fn update_by_repo_uint() {
+        let test = TestTunables::default();
+
+        assert_eq!(test.by_repo_repouint("repo"), None);
+        assert_eq!(test.by_repo_repouint("repo2"), None);
+
+        test.update_by_repo_ints(&hashmap! {
+            s("repo") => hashmap! {
+                s("repouint") => 1,
+            },
+            s("repo2") => hashmap! {
+                s("repouint") => 2,
+            },
+        });
+        assert_eq!(test.by_repo_repouint("repo"), Some(1));
+        assert_eq!(test.by_repo_repouint("repo2"), Some(2));
+
+        test.update_by_repo_ints(&hashmap! {
+            s("repo") => hashmap! {
+                s("repouint") => 3,
+            },
+        });
+        assert_eq!(test.by_repo_repouint("repo"), Some(3));
+        assert_eq!(test.by_repo_repouint("repo2"), None);
+
+        test.update_by_repo_ints(&hashmap! {
+            s(":default:") => hashmap! {
+                s("repouint") => 4
+            },
+            s("repo") => hashmap! {
+                s("repouint") => 1,
+            },
+        });
+
+        assert_eq!(test.by_repo_repouint("repo"), Some(1));
+        assert_eq!(test.by_repo_repouint("repo2"), Some(4));
+
+        test.update_by_repo_ints(&hashmap! {
+            s(":override:") => hashmap! {
+                s("repouint") => 4
+            },
+            s("repo") => hashmap! {
+                s("repouint") => 1,
+            },
+        });
+
+        assert_eq!(test.by_repo_repouint("repo"), Some(4));
+        assert_eq!(test.by_repo_repouint("repo2"), Some(4));
+    }
+
+    #[test]
     fn update_by_repo_two_ints() {
         let test = TestTunables::default();
         assert_eq!(test.by_repo_repoint("repo"), None);
@@ -1026,10 +1084,15 @@ mod test {
     async fn test_with_tunables_async(_fb: fbinit::FacebookInit) {
         let res = with_tunables_async(
             MononokeTunables {
-                wishlist_write_qps: ArcSwapOption::from(Some(Arc::new(2))),
+                warm_bookmark_cache_poll_interval_ms: ArcSwapOption::from(Some(Arc::new(2))),
                 ..MononokeTunables::default()
             },
-            async { tunables().wishlist_write_qps().unwrap_or_default() }.boxed(),
+            async {
+                tunables()
+                    .warm_bookmark_cache_poll_interval_ms()
+                    .unwrap_or_default()
+            }
+            .boxed(),
         )
         .await;
 

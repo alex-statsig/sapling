@@ -25,7 +25,7 @@ from . import configitems, error, identity, pycompat, util
 configitem = configitems.getitemregister
 
 
-class _funcregistrarbase(object):
+class _funcregistrarbase:
     """Base of decorator to register a function for specific purpose
 
     This decorator stores decorated functions into own dict 'table'.
@@ -68,7 +68,7 @@ class _funcregistrarbase(object):
             msg = 'duplicate registration for name: "%s"' % name
             raise error.ProgrammingError(msg)
 
-        if func.__doc__ and not util.safehasattr(func, "_origdoc"):
+        if func.__doc__ and not hasattr(func, "_origdoc"):
             doc = func.__doc__.strip()
             func._origdoc = doc
             func.__doc__ = self._formatdoc(decl, doc)

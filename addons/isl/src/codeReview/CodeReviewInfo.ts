@@ -10,10 +10,13 @@ import type {UICodeReviewProvider} from './UICodeReviewProvider';
 
 import serverAPI from '../ClientToServerAPI';
 import {Internal} from '../Internal';
-import {repositoryInfo} from '../serverAPIState';
+import {messageSyncingEnabledState} from '../messageSyncing';
+import {treeWithPreviews} from '../previews';
+import {commitByHash, repositoryInfo} from '../serverAPIState';
 import {GithubUICodeReviewProvider} from './github/github';
-import {atom, selector, selectorFamily} from 'recoil';
+import {atom, DefaultValue, selector, selectorFamily} from 'recoil';
 import {debounce} from 'shared/debounce';
+import {unwrap} from 'shared/utils';
 
 export const codeReviewProvider = selector<UICodeReviewProvider | null>({
   key: 'codeReviewProvider',
@@ -64,7 +67,29 @@ export const allDiffSummaries = atom<Result<Map<DiffId, DiffSummary> | null>>({
   effects: [
     ({setSelf}) => {
       const disposable = serverAPI.onMessageOfType('fetchedDiffSummaries', event => {
-        setSelf(event.summaries);
+        setSelf(existing => {
+          if (existing instanceof DefaultValue) {
+            return event.summaries;
+          }
+          if (existing.error) {
+            // TODO: if we only fetch one diff, but had an error on the overall fetch... should we still somehow show that error...?
+            // Right now, this will reset all other diffs to "loading" instead of error
+            // Probably, if all diffs fail to fetch, so will individual diffs.
+            return event.summaries;
+          }
+
+          if (event.summaries.error || existing.value == null) {
+            return event.summaries;
+          }
+
+          // merge old values with newly fetched ones
+          return {
+            value: new Map([
+              ...unwrap(existing.value).entries(),
+              ...event.summaries.value.entries(),
+            ]),
+          };
+        });
       });
       return () => disposable.dispose();
     },
@@ -75,6 +100,55 @@ export const allDiffSummaries = atom<Result<Map<DiffId, DiffSummary> | null>>({
         }),
       ),
   ],
+});
+
+/**
+ * Latest commit message (title,description) for a hash.
+ * There's multiple competing values, in order of priority:
+ * (1) the optimistic commit's message
+ * (2) the latest commit message on the server (phabricator/github)
+ * (3) the local commit's message
+ *
+ * Remote messages preferred above local messages, so you see remote changes accounted for.
+ * Optimistic changes preferred above remote changes, since we should always
+ * async update the remote message to match the optimistic state anyway, but the UI will
+ * be smoother if we use the optimistic one before the remote has gotten the update propagated.
+ * This is only necessary if the optimistic message is different than the local message.
+ */
+export const latestCommitMessage = selectorFamily<[title: string, description: string], string>({
+  key: 'latestCommitMessage',
+  get:
+    (hash: string) =>
+    ({get}) => {
+      const commit = get(commitByHash(hash));
+      const preview = get(treeWithPreviews).treeMap.get(hash)?.info;
+
+      if (
+        preview != null &&
+        (preview.title !== commit?.title || preview.description !== commit?.description)
+      ) {
+        return [preview.title, preview.description];
+      }
+
+      if (!commit) {
+        return ['', ''];
+      }
+
+      const syncEnabled = get(messageSyncingEnabledState);
+
+      let remoteTitle = commit.title;
+      let remoteDescription = commit.description;
+      if (syncEnabled && commit.diffId) {
+        // use the diff's commit message instead of the local one, if available
+        const summary = get(diffSummary(commit.diffId));
+        if (summary?.value) {
+          remoteTitle = summary.value.title;
+          remoteDescription = summary.value.commitMessage;
+        }
+      }
+
+      return [remoteTitle, remoteDescription];
+    },
 });
 
 export const pageVisibility = atom<PageVisibility>({

@@ -245,7 +245,7 @@ class RevCompatSet(MutableSet):
         self.__dict__.pop("_revs", None)
 
 
-class rebaseruntime(object):
+class rebaseruntime:
     """This class is a container for rebase runtime state"""
 
     def __init__(self, repo, ui, templ, inmemory=False, opts=None):
@@ -893,7 +893,13 @@ class rebaseruntime(object):
             ui.debug("rebased as %s\n" % short(newnode))
         else:
             if not self.collapsef:
-                ui.warn(_("note: rebase of %s created no changes to commit\n") % (ctx))
+                ui.warn(
+                    _(
+                        "note: not rebasing %s, its destination (rebasing onto) commit "
+                        "already has all its changes\n"
+                    )
+                    % (ctx)
+                )
                 self.skipped.add(rev)
             self.state[rev] = p1
             ui.debug("next revision set to %s\n" % p1)
@@ -1044,7 +1050,7 @@ def _simplemerge(ui, basectx, ctx, p1ctx, manifestbuilder):
         if merged != localtext:
             ui.status(_("merging %s\n") % file)
 
-        if m3.conflicts:
+        if m3.conflictscount:
             conflicts.append(file)
         else:
             resolved[file] = merged
@@ -1673,6 +1679,18 @@ def concludenode(
                 editor=editor,
                 loginfo=loginfo,
                 mutinfo=mutinfo,
+            )
+
+        if newnode and p2 == nullrev:
+            # log the newnode of a rebase operation, this data is used for
+            # merge conflicts analysis.
+            reponame = repo.ui.config("remotefilelog", "reponame", "unknown")
+            repo.ui.log(
+                "merge_conflicts",
+                dest_hex=repo[p1].hex(),
+                src_hex=ctx.hex(),
+                newnode_hex=hex(newnode),
+                repo=reponame,
             )
 
         repo.dirstate.setbranch(repo[newnode].branch())

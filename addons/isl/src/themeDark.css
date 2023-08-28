@@ -5,8 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-.dark-theme,
-.vscode-dark {
+html .dark-theme,
+html .vscode-dark {
   --scm-modified-foreground: #e2c08d;
   --scm-added-foreground: #73c991;
   --scm-removed-foreground: #f3674f;
@@ -21,12 +21,32 @@
   --hover-darken: rgba(255, 255, 255, 0.1);
   --highlight-foreground: #f0f0f0;
 
+  --selection-mix-mode: lighten;
+
   /* github PR colors */
   --github-badge-fg: white;
   --github-open-bg: #238636;
   --github-closed-bg: #da3633;
   --github-merged-bg: #8957e5;
   --github-neutral-bg: #6e7781;
+
+  /* Editor colors */
+  --diffEditor-foreground: rgb(201, 209, 217);
+  --diffEditor-insertedLineBackground: #5fff8422;
+  --diffEditor-insertedLineHighlightBackground: #5fff8433;
+  --diffEditor-removedLineBackground: #fa7e7c33;
+  --diffEditor-removedLineHighlightBackground: #fa7e7c55;
+  --diffEditor-modifiedLineBackground: #deb94033;
+  --diffEditor-modifiedLineHighlightBackground: #deb94066;
+  --editor-selectionBackground: #264f78;
+
+  /* Signal colors */
+  --signal-good-bg: #2da44e;
+  --signal-medium-bg: #e0d12d;
+  --signal-bad-bg: #cf222e;
+  --signal-fg: white;
+
+  --checkbox-border: var(--vscode-contrastBorder, rgba(255, 255, 255, 0.2));
 
   /* VS Code Webview UI Toolkit includes dark theme colors already */
 }

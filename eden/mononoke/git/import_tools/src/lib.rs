@@ -12,7 +12,6 @@ mod gitimport_objects;
 mod gitlfs;
 
 use std::collections::BTreeMap;
-use std::collections::HashSet;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::RwLock;
@@ -28,12 +27,13 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::TryFutureExt;
 use futures::TryStreamExt;
-use git_hash::ObjectId;
-use git_object::Object;
+use git_symbolic_refs::GitSymbolicRefsEntry;
+use gix_hash::ObjectId;
+use gix_object::Object;
 use linked_hash_map::LinkedHashMap;
-use manifest::bonsai_diff;
 use manifest::BonsaiDiffFileChange;
 use mononoke_types::ChangesetId;
+use mononoke_types::FileType;
 use mononoke_types::MPath;
 use slog::debug;
 use slog::info;
@@ -62,6 +62,10 @@ pub use crate::gitlfs::LfsMetaData;
 pub const HGGIT_MARKER_EXTRA: &str = "hg-git-rename-source";
 pub const HGGIT_MARKER_VALUE: &[u8] = b"git";
 pub const HGGIT_COMMIT_ID_EXTRA: &str = "convert_revision";
+pub const BRANCH_REF: &str = "branch";
+pub const TAG_REF: &str = "tag";
+pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
+pub const TAG_REF_PREFIX: &str = "refs/tags/";
 
 // TODO: Try to produce copy-info?
 async fn find_file_changes<S, U>(
@@ -83,7 +87,12 @@ where
                     match change {
                         BonsaiDiffFileChange::Changed(path, ty, GitLeaf(oid))
                         | BonsaiDiffFileChange::ChangedReusedId(path, ty, GitLeaf(oid)) => {
-                            let git_bytes = {
+                            let git_bytes = if ty == FileType::GitSubmodule {
+                                // The OID for a submodule is a commit in
+                                // another repository, so there is no data to
+                                // store.
+                                Bytes::new()
+                            } else {
                                 let object = reader.get_object(&oid).await?;
                                 let blob = object
                                     .parsed
@@ -131,7 +140,7 @@ impl GitimportAccumulator {
         self.inner.insert(oid, cs_id);
     }
 
-    pub fn get(&self, oid: &git_hash::oid) -> Option<ChangesetId> {
+    pub fn get(&self, oid: &gix_hash::oid) -> Option<ChangesetId> {
         self.inner.get(oid).copied()
     }
 }
@@ -253,43 +262,34 @@ pub async fn gitimport_acc<Uploader: GitUploader>(
             }
         })
         .map_ok(|oid| {
-            cloned!(ctx, reader, uploader, prefs.lfs);
+            cloned!(ctx, reader, uploader, prefs.lfs, prefs.submodules);
             async move {
                 task::spawn({
                     async move {
-                        let ExtractedCommit {
-                            metadata,
-                            tree,
-                            parent_trees,
-                            original_commit,
-                        } = ExtractedCommit::new(&ctx, oid, &reader)
+                        let extracted_commit = ExtractedCommit::new(&ctx, oid, &reader)
                             .await
                             .with_context(|| format!("While extracting {}", oid))?;
 
-                        let file_changes = find_file_changes(
-                            &ctx,
-                            &lfs,
-                            &reader,
-                            uploader,
-                            bonsai_diff(ctx.clone(), reader.clone(), tree, parent_trees),
-                        )
-                        .await?;
+                        let diff = extracted_commit.diff(&ctx, &reader, submodules);
+                        let file_changes =
+                            find_file_changes(&ctx, &lfs, &reader, uploader, diff).await?;
 
-                        Result::<_, Error>::Ok((metadata, file_changes, original_commit, tree))
+                        Result::<_, Error>::Ok((extracted_commit, file_changes))
                     }
                 })
                 .await?
             }
         })
         .try_buffered(prefs.concurrency)
-        .and_then(|(metadata, file_changes, original_commit, tree)| {
+        .and_then(|(extracted_commit, file_changes)| {
             let acc = &acc;
             let uploader = &uploader;
             let repo_name = &repo_name;
             let reader = &reader;
             async move {
-                let oid = metadata.oid;
-                let bonsai_parents = metadata
+                let oid = extracted_commit.metadata.oid;
+                let bonsai_parents = extracted_commit
+                    .metadata
                     .parents
                     .iter()
                     .map(|p| {
@@ -309,31 +309,36 @@ pub async fn gitimport_acc<Uploader: GitUploader>(
 
                 // Before generating the corresponding changeset at Mononoke end, upload the raw git commit
                 // and the git tree pointed to by the git commit.
-                let tree_for_commit =
-                    read_raw_object(reader, &tree.0).await.with_context(|| {
-                        format_err!("Failed to fetch git tree {} for commit {}", tree.0, oid)
+                let tree_for_commit = read_raw_object(reader, &extracted_commit.tree_oid)
+                    .await
+                    .with_context(|| {
+                        format_err!(
+                            "Failed to fetch git tree {} for commit {}",
+                            extracted_commit.tree_oid,
+                            oid
+                        )
                     })?;
                 // Upload Git Tree
                 uploader
-                    .upload_object(ctx, tree.0, tree_for_commit)
+                    .upload_object(ctx, extracted_commit.tree_oid, tree_for_commit)
                     .await
                     .with_context(|| {
                         format_err!(
                             "Failed to upload raw git tree {} for commit {}",
-                            tree.0,
+                            extracted_commit.tree_oid,
                             oid
                         )
                     })?;
                 // Upload Git commit
                 uploader
-                    .upload_object(ctx, oid, original_commit)
+                    .upload_object(ctx, oid, extracted_commit.original_commit)
                     .await
                     .with_context(|| format_err!("Failed to upload raw git commit {}", oid))?;
                 let (int_cs, bcs_id) = uploader
                     .generate_changeset_for_commit(
                         ctx,
                         bonsai_parents,
-                        metadata,
+                        extracted_commit.metadata,
                         file_changes,
                         dry_run,
                     )
@@ -394,6 +399,53 @@ impl GitRef {
             maybe_tag_id: None,
         }
     }
+}
+
+/// Read symbolic references from git
+pub async fn read_symref(
+    symref_name: &str,
+    path: &Path,
+    prefs: &GitimportPreferences,
+) -> Result<GitSymbolicRefsEntry, Error> {
+    let mut command = Command::new(&prefs.git_command_path)
+        .current_dir(path)
+        .env_clear()
+        .kill_on_drop(false)
+        .stdout(Stdio::piped())
+        .arg("symbolic-ref")
+        .arg(symref_name)
+        .spawn()
+        .with_context(|| format!("failed to run git with {:?}", prefs.git_command_path))?;
+    let mut stdout = BufReader::new(command.stdout.take().context("stdout not set up")?);
+    let mut ref_mapping = String::new();
+    stdout.read_line(&mut ref_mapping).await.with_context(|| {
+        format!(
+            "failed to get output of git symbolic-ref for ref {} at path {}",
+            symref_name,
+            path.display()
+        )
+    })?;
+    let ref_mapping = ref_mapping.trim();
+    let symref_entry = match ref_mapping.strip_prefix(BRANCH_REF_PREFIX) {
+        Some(branch_name) => GitSymbolicRefsEntry::new(
+            symref_name.to_string(),
+            branch_name.to_string(),
+            BRANCH_REF.to_string(),
+        )?,
+        None => match ref_mapping.strip_prefix(TAG_REF_PREFIX) {
+            Some(tag_name) => GitSymbolicRefsEntry::new(
+                symref_name.to_string(),
+                tag_name.to_string(),
+                TAG_REF.to_string(),
+            )?,
+            None => anyhow::bail!(
+                "Unexpected ref format {} for symref {}",
+                ref_mapping,
+                symref_name
+            ),
+        },
+    };
+    Ok(symref_entry)
 }
 
 pub async fn read_git_refs(
@@ -468,32 +520,27 @@ pub async fn import_tree_as_single_bonsai_changeset(
 
     let sha1 = oid_to_sha1(&git_cs_id)?;
 
-    let ExtractedCommit {
-        tree,
-        metadata,
-        original_commit,
-        ..
-    } = ExtractedCommit::new(ctx, git_cs_id, &reader)
+    let extracted_commit = ExtractedCommit::new(ctx, git_cs_id, &reader)
         .await
         .with_context(|| format!("While extracting {}", git_cs_id))?;
 
-    let file_changes = find_file_changes(
-        ctx,
-        &prefs.lfs,
-        &reader.clone(),
-        uploader.clone(),
-        bonsai_diff(ctx.clone(), reader, tree, HashSet::new()),
-    )
-    .await?;
+    let diff = extracted_commit.diff_root(ctx, &reader, prefs.submodules);
+    let file_changes = find_file_changes(ctx, &prefs.lfs, &reader, uploader.clone(), diff).await?;
 
     // Before generating the corresponding changeset at Mononoke end, upload the raw git commit.
     uploader
-        .upload_object(ctx, git_cs_id, original_commit)
+        .upload_object(ctx, git_cs_id, extracted_commit.original_commit)
         .await
         .with_context(|| format_err!("Failed to upload raw git commit {}", git_cs_id))?;
 
     uploader
-        .generate_changeset_for_commit(ctx, vec![], metadata, file_changes, prefs.dry_run)
+        .generate_changeset_for_commit(
+            ctx,
+            vec![],
+            extracted_commit.metadata,
+            file_changes,
+            prefs.dry_run,
+        )
         .and_then(|(cs, id)| {
             uploader
                 .finalize_batch(ctx, prefs.dry_run, vec![(cs, sha1)])

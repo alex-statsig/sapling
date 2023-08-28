@@ -104,6 +104,12 @@ SUPPORTED_MOUNT_PROTOCOLS: Set[str] = {
     PRJFS_MOUNT_PROTOCOL_STRING,
 }
 
+SUPPORTED_INODE_CATALOG_TYPES: Set[str] = {
+    "legacy",
+    "sqlite",
+    "inmemory",
+}
+
 # Create a readme file with this name in the mount point directory.
 # The intention is for this to contain instructions telling users what to do if their
 # EdenFS mount is not currently mounted.
@@ -183,6 +189,7 @@ class CheckoutConfig(typing.NamedTuple):
     use_write_back_cache: bool
     re_use_case: str
     enable_windows_symlinks: bool
+    inode_catalog_type: Optional[str]
 
 
 class ListMountInfo(typing.NamedTuple):
@@ -501,6 +508,12 @@ class EdenInstance(AbstractEdenInstance):
                 ("backing_repo", str(checkout.get_backing_repo_path())),
             ]
         )
+
+        if checkout_config.inode_catalog_type is not None:
+            ret["inode_catalog_type"] = checkout_config.inode_catalog_type
+
+        if sys.platform == "win32":
+            ret["symlinks_enabled"] = checkout_config.enable_windows_symlinks
 
         if snapshot is not None:
             ret["checked_out_revision"] = snapshot.last_checkout_hash
@@ -1237,6 +1250,7 @@ class EdenCheckout:
                 "enable-sqlite-overlay": checkout_config.enable_sqlite_overlay,
                 "use-write-back-cache": checkout_config.use_write_back_cache,
                 "enable-windows-symlinks": checkout_config.enable_windows_symlinks,
+                "inode-catalog-type": checkout_config.inode_catalog_type,
             },
             "redirections": redirections,
             "profiles": {
@@ -1397,6 +1411,29 @@ class EdenCheckout:
         if not isinstance(enable_windows_symlinks, bool):
             enable_windows_symlinks = False
 
+        inode_catalog_type = repository.get("inode-catalog-type")
+        if inode_catalog_type is not None:
+            if (
+                not isinstance(inode_catalog_type, str)
+                or inode_catalog_type.lower() not in SUPPORTED_INODE_CATALOG_TYPES
+            ):
+                raise Exception(
+                    f'repository "{config_path}" has unsupported inode catalog (overlay) type '
+                    f'"{inode_catalog_type}". Supported inode catalog (overlay) types are: '
+                    f'{", ".join(sorted(SUPPORTED_INODE_CATALOG_TYPES))}.'
+                )
+            inode_catalog_type = inode_catalog_type.lower()
+            if sys.platform == "win32" and inode_catalog_type == "legacy":
+                raise Exception(
+                    "Legacy inode catalog (overlay) type not supported on Windows. "
+                    "Use Sqlite or InMemory on Windows."
+                )
+            elif sys.platform != "win32" and inode_catalog_type == "inmemory":
+                raise Exception(
+                    "InMemory inode catalog (overlay) type is only supported on Windows. "
+                    "Use Legacy or Sqlite on Linux and MacOS."
+                )
+
         return CheckoutConfig(
             backing_repo=Path(get_field("path")),
             scm_type=scm_type,
@@ -1415,6 +1452,7 @@ class EdenCheckout:
             use_write_back_cache=use_write_back_cache,
             re_use_case=re_use_case,
             enable_windows_symlinks=enable_windows_symlinks,
+            inode_catalog_type=inode_catalog_type,
         )
 
     def get_snapshot(self) -> SnapshotState:

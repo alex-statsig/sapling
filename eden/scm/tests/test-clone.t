@@ -1,13 +1,10 @@
-#chg-compatible
 #debugruntest-compatible
 #inprocess-hg-incompatible
   $ setconfig format.use-segmented-changelog=true
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig workingcopy.ruststatus=False
   $ setconfig experimental.allowfilepeer=True
   $ setconfig clone.use-rust=1
 
-  $ disable treemanifest
   $ configure dummyssh
 
 Prepare repo a:
@@ -467,30 +464,6 @@ destination directory not empty
   abort: destination 'a' is not empty
   [255]
 
-
-#if unix-permissions no-root
-
-leave existing directory in place after clone failure
-
-  $ hg init c
-  $ cd c
-  $ echo c > c
-  $ hg commit -A -m test
-  adding c
-  $ chmod -rx .hg/store/data
-  $ cd ..
-  $ mkdir d
-  $ hg clone c d 2> err
-  [255]
-  $ test -d d
-  $ test -d d/.hg
-  [1]
-
-re-enable perm to allow deletion
-
-  $ chmod +rx c/.hg/store/data
-
-#endif
 
   $ cd ..
 

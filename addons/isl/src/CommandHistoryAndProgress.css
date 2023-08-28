@@ -91,3 +91,32 @@
   word-wrap: break-word;
   white-space: pre-wrap;
 }
+
+.progress-container-last-output {
+  max-height: 5rem;
+  overflow-y: auto;
+}
+
+.progress-container-last-output code {
+  white-space: pre-wrap;
+}
+
+.progress-line {
+  display: flex;
+  gap: var(--pad);
+  align-items: center;
+}
+.progress-bar {
+  width: 120px;
+  height: 6px;
+  border-radius: 8px;
+  background-color: var(--hover-darken);
+}
+
+.progress-bar-filled {
+  height: 100%;
+  display: block;
+  border-radius: 8px;
+  background-color: var(--button-primary-hover-background);
+  transition: width 0.1s;
+}

@@ -76,7 +76,7 @@ _otherchangedlocaldeletedmsg = _(
 )
 
 
-class absentfilectx(object):
+class absentfilectx:
     """Represents a file that's ostensibly in a context but is actually not
     present in it.
 
@@ -157,7 +157,7 @@ def _findexternaltoolwithreporoot(ui, repo, tool):
     return util.findexe(util.expandpath(exe))
 
 
-class merge_context(object):
+class merge_context:
     def __init__(self, local, other, ancestor):
         self.local = local
         self.other = other
@@ -427,6 +427,7 @@ def _iprompt(repo, mynode, orig, fcd, fco, fca, toolconf, labels=None):
                         )
 
             ui.metrics.gauge("filemerge_prompt_localdeleted", 1)
+            prompts["hint"] = _hint_for_missing_file(repo, fcd, fco, fd)
             index = ui.promptchoice(_otherchangedlocaldeletedmsg % prompts, 2)
             choice = ["other", "local", "unresolved", "rename"][index]
         else:
@@ -474,6 +475,61 @@ def _iprompt(repo, mynode, orig, fcd, fco, fca, toolconf, labels=None):
     except error.ResponseExpected:
         ui.write("\n")
         return _ifail(repo, mynode, orig, fcd, fco, fca, toolconf, labels)
+
+
+def _hint_for_missing_file(repo, fcd, fco, fd):
+    def get_node(fctx):
+        # for workingctx return p1's node
+        ctx = fctx.changectx()
+        return ctx.node() if ctx.node() else ctx.p1().node()
+
+    def get_hex(fctx):
+        ctx = fctx.changectx()
+        return ctx.hex() if ctx.node() else ctx.p1().hex()
+
+    default_hint = _(
+        "if this is due to a renamed file, you can manually input the renamed path"
+    )
+    # enable it in tests by default
+    if not repo.ui.configbool("copytrace", "hint-with-commit", util.istest()):
+        return default_hint
+
+    dagcopytrace = repo._dagcopytrace
+    copytrace_error = False
+    try:
+        trace_result = dagcopytrace.trace_rename_ex(get_node(fco), get_node(fcd), fd)
+    except Exception as e:
+        copytrace_error = True
+        if util.istest():
+            raise e
+        else:
+            return default_hint
+    finally:
+        repo.ui.log(
+            "merge_conflicts",
+            dest_hex=get_hex(fcd),
+            src_hex=get_hex(fco),
+            repo=repo.ui.config("remotefilelog", "reponame", "unknown"),
+            copytrace_missing_file=fd,
+            copytrace_error=int(copytrace_error),
+        )
+
+    type_ = trace_result["t"].lower()
+    if type_ in ("added", "deleted"):
+        node, path = trace_result["c"]
+        label = _("being rebased" if type_ == "added" else "rebasing onto")
+        if path == fd:
+            path_info = ""
+        else:
+            path_info = _(" with name '%s'") % path
+        return _("the missing file was probably %s by commit %s%s in the branch %s") % (
+            type_,
+            short(node),
+            path_info,
+            label,
+        )
+    else:
+        return default_hint
 
 
 @internaltool("local", nomerge)
@@ -785,7 +841,7 @@ def _idump(repo, mynode, orig, fcd, fco, fca, toolconf, files, labels=None):
             paths=[fcd.path()],
         )
 
-    util.writefile(a + ".local", fcd.decodeddata())
+    util.writefile(a + ".local", fcd.data())
     repo.wwrite(fd + ".other", fco.data(), fco.flags())
     repo.wwrite(fd + ".base", fca.data(), fca.flags())
     return False, 1, False
@@ -987,7 +1043,7 @@ def _maketempfiles(repo, fco, fca):
         fullbase, ext = os.path.splitext(ctx.path())
         pre = "%s~%s." % (os.path.basename(fullbase), prefix)
         (fd, name) = tempfile.mkstemp(prefix=pre, suffix=ext)
-        data = repo.wwritedata(ctx.path(), ctx.data())
+        data = ctx.data()
         f = util.fdopen(fd, "wb")
         f.write(data)
         f.close()

@@ -7,8 +7,10 @@
 
 #pragma once
 
+#include "eden/fs/inodes/EdenMount.h"
 #include "eden/fs/prjfs/PrjfsDispatcher.h"
 #include "eden/fs/service/gen-cpp2/eden_types.h"
+#include "eden/fs/utils/String.h"
 
 namespace facebook::eden {
 
@@ -89,11 +91,20 @@ class PrjfsDispatcherImpl : public PrjfsDispatcher {
 
   ImmediateFuture<folly::Unit> waitForPendingNotifications() override;
 
+  ImmediateFuture<bool> isFinalSymlinkPathDirectory(
+      RelativePath symlink,
+      string_view targetStringView,
+      const ObjectFetchContextPtr& context,
+      const int remainingRecursionDepth = kMaxSymlinkChainDepth);
+
  private:
   // The EdenMount associated with this dispatcher.
   EdenMount* const mount_;
+  folly::Synchronized<std::unordered_set<RelativePath>> symlinkCheck_;
 
   const std::string dotEdenConfig_;
+
+  bool symlinksEnabled_;
 };
 
 } // namespace facebook::eden

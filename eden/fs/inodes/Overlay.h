@@ -16,6 +16,8 @@
 #include <condition_variable>
 #include <optional>
 #include <thread>
+#include "eden/fs/config/InodeCatalogOptions.h"
+#include "eden/fs/config/InodeCatalogType.h"
 #include "eden/fs/inodes/InodeNumber.h"
 #include "eden/fs/inodes/overlay/OverlayChecker.h"
 #include "eden/fs/inodes/overlay/gen-cpp2/overlay_types.h"
@@ -75,16 +77,6 @@ class OverlayFile;
  */
 class Overlay : public std::enable_shared_from_this<Overlay> {
  public:
-  enum class InodeCatalogType : uint8_t {
-    Legacy = 0,
-    Sqlite = 1,
-    SqliteInMemory = 2,
-    SqliteSynchronousOff = 3,
-    SqliteBuffered = 4,
-    SqliteInMemoryBuffered = 5,
-    SqliteSynchronousOffBuffered = 6,
-  };
-
   /**
    * Create a new Overlay object.
    *
@@ -95,8 +87,10 @@ class Overlay : public std::enable_shared_from_this<Overlay> {
       AbsolutePathPiece localDir,
       CaseSensitivity caseSensitive,
       InodeCatalogType inodeCatalogType,
+      InodeCatalogOptions inodeCatalogOptions,
       std::shared_ptr<StructuredLogger> logger,
       EdenStatsPtr stats,
+      bool windowsSymlinksEnabled,
       const EdenConfig& config);
 
   ~Overlay();
@@ -128,9 +122,9 @@ class Overlay : public std::enable_shared_from_this<Overlay> {
       std::shared_ptr<const EdenConfig> config,
       std::optional<AbsolutePath> mountPath = std::nullopt,
       OverlayChecker::ProgressCallback&& progressCallback = [](auto) {},
-      OverlayChecker::LookupCallback&& lookupCallback =
+      InodeCatalog::LookupCallback&& lookupCallback =
           [](auto, auto) {
-            return makeImmediateFuture<OverlayChecker::LookupCallbackValue>(
+            return makeImmediateFuture<InodeCatalog::LookupCallbackValue>(
                 std::runtime_error("no lookup callback"));
           });
 
@@ -190,7 +184,12 @@ class Overlay : public std::enable_shared_from_this<Overlay> {
   InodeMetadataTable* getInodeMetadataTable() const {
     return inodeMetadataTable_.get();
   }
+
 #endif // !_WIN32
+
+  bool getWindowsSymlinksEnabled() const {
+    return windowsSymlinksEnabled_;
+  }
 
   void saveOverlayDir(InodeNumber inodeNumber, const DirContents& dir);
 
@@ -302,8 +301,10 @@ class Overlay : public std::enable_shared_from_this<Overlay> {
       AbsolutePathPiece localDir,
       CaseSensitivity caseSensitive,
       InodeCatalogType inodeCatalogType,
+      InodeCatalogOptions inodeCatalogOptions,
       std::shared_ptr<StructuredLogger> logger,
       EdenStatsPtr stats,
+      bool windowsSymlinksEnabled_,
       const EdenConfig& config);
 
   /**
@@ -339,7 +340,7 @@ class Overlay : public std::enable_shared_from_this<Overlay> {
       std::shared_ptr<const EdenConfig> config,
       std::optional<AbsolutePath> mountPath,
       const OverlayChecker::ProgressCallback& progressCallback,
-      OverlayChecker::LookupCallback& lookupCallback);
+      InodeCatalog::LookupCallback& lookupCallback);
   void gcThread() noexcept;
   void handleGCRequest(GCRequest& request);
 
@@ -362,7 +363,8 @@ class Overlay : public std::enable_shared_from_this<Overlay> {
 
   std::unique_ptr<IFileContentStore> fileContentStore_;
   std::unique_ptr<InodeCatalog> inodeCatalog_;
-  Overlay::InodeCatalogType inodeCatalogType_;
+  InodeCatalogType inodeCatalogType_;
+  InodeCatalogOptions inodeCatalogOptions_;
 
   /**
    * Indicates if the backing overlay supports semantic operations, see
@@ -417,11 +419,14 @@ class Overlay : public std::enable_shared_from_this<Overlay> {
   EdenStatsPtr stats_;
 
   friend class IORequest;
+
+  bool windowsSymlinksEnabled_;
 };
 
-constexpr Overlay::InodeCatalogType kDefaultInodeCatalogType = folly::kIsWindows
-    ? Overlay::InodeCatalogType::Sqlite
-    : Overlay::InodeCatalogType::Legacy;
+constexpr InodeCatalogType kDefaultInodeCatalogType =
+    folly::kIsWindows ? InodeCatalogType::Sqlite : InodeCatalogType::Legacy;
+constexpr InodeCatalogOptions kDefaultInodeCatalogOptions =
+    INODE_CATALOG_DEFAULT;
 
 /**
  * Used to reference count IO requests. In any place that there

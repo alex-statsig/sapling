@@ -1,10 +1,6 @@
-#chg-compatible
 #debugruntest-compatible
 
   $ eagerepo
-  $ setconfig workingcopy.ruststatus=False
-FIXME(status):
-  $ setconfig status.use-rust=false
 Quote from test-revert.t but this version is stronger - mtime was changed
 manually.
 

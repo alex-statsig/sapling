@@ -54,6 +54,9 @@ use filenodes_derivation::FilenodesOnlyPublic;
 use filestore::ArcFilestoreConfig;
 use filestore::FilestoreConfig;
 use fsnodes::RootFsnodeId;
+use git_symbolic_refs::ArcGitSymbolicRefs;
+use git_symbolic_refs::SqlGitSymbolicRefsBuilder;
+use git_types::MappedGitCommitId;
 use git_types::TreeHandle;
 use hooks::ArcHookManager;
 use hooks::HookManager;
@@ -174,6 +177,7 @@ pub fn default_test_repo_config() -> RepoConfig {
             RootDeletedManifestV2Id::NAME.to_string(),
             RootUnodeManifestId::NAME.to_string(),
             TreeHandle::NAME.to_string(),
+            MappedGitCommitId::NAME.to_string(),
             MappedHgChangesetId::NAME.to_string(),
             RootSkeletonManifestId::NAME.to_string(),
             RootBasenameSuffixSkeletonManifest::NAME.to_string(),
@@ -264,6 +268,7 @@ impl TestRepoFactory {
         metadata_con.execute_batch(SqlBonsaiSvnrevMappingBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlBonsaiTagMappingBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlBonsaiHgMappingBuilder::CREATION_QUERY)?;
+        metadata_con.execute_batch(SqlGitSymbolicRefsBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlPhasesBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlPushrebaseMutationMappingConnection::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlLongRunningRequestsQueue::CREATION_QUERY)?;
@@ -496,6 +501,15 @@ impl TestRepoFactory {
         ))
     }
 
+    /// Construct Git Symbolic Refs using the in-memory metadata
+    /// database.
+    pub fn git_symbolic_refs(&self, repo_identity: &ArcRepoIdentity) -> Result<ArcGitSymbolicRefs> {
+        Ok(Arc::new(
+            SqlGitSymbolicRefsBuilder::from_sql_connections(self.metadata_db.clone())
+                .build(repo_identity.id()),
+        ))
+    }
+
     /// Construct Pushrebase Mutation Mapping using the in-memory metadata
     /// database.
     pub fn pushrebase_mutation_mapping(
@@ -567,6 +581,7 @@ impl TestRepoFactory {
         changesets: &ArcChangesets,
         commit_graph: &ArcCommitGraph,
         bonsai_hg_mapping: &ArcBonsaiHgMapping,
+        bonsai_git_mapping: &ArcBonsaiGitMapping,
         filenodes: &ArcFilenodes,
         repo_blobstore: &ArcRepoBlobstore,
     ) -> Result<ArcRepoDerivedData> {
@@ -580,6 +595,7 @@ impl TestRepoFactory {
             changesets.clone(),
             commit_graph.clone(),
             bonsai_hg_mapping.clone(),
+            bonsai_git_mapping.clone(),
             filenodes.clone(),
             repo_blobstore.as_ref().clone(),
             lease,
@@ -707,6 +723,7 @@ impl TestRepoFactory {
         changesets: &ArcChangesets,
         commit_graph: &ArcCommitGraph,
         bonsai_hg_mapping: &ArcBonsaiHgMapping,
+        bonsai_git_mapping: &ArcBonsaiGitMapping,
         filenodes: &ArcFilenodes,
         repo_blobstore: &ArcRepoBlobstore,
     ) -> Result<ArcDerivedDataManagerSet> {
@@ -723,6 +740,7 @@ impl TestRepoFactory {
             changesets.clone(),
             commit_graph.clone(),
             bonsai_hg_mapping.clone(),
+            bonsai_git_mapping.clone(),
             filenodes.clone(),
             repo_blobstore.as_ref().clone(),
             lease,

@@ -22,13 +22,16 @@ use bytes::Bytes;
 use context::CoreContext;
 use encoding_rs::Encoding;
 use futures::stream::Stream;
+use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
-use git_hash::ObjectId;
-use git_object::bstr::BString;
-use git_object::tree;
-use git_object::Commit;
-use git_object::Tag;
-use git_object::Tree;
+use gix_hash::ObjectId;
+use gix_object::bstr::BString;
+use gix_object::tree;
+use gix_object::Commit;
+use gix_object::Tag;
+use gix_object::Tree;
+use manifest::bonsai_diff;
+use manifest::BonsaiDiffFileChange;
 use manifest::Entry;
 use manifest::Manifest;
 use manifest::StoreLoadable;
@@ -52,16 +55,29 @@ use tokio_stream::wrappers::LinesStream;
 use crate::git_reader::GitRepoReader;
 use crate::gitlfs::GitImportLfs;
 
+/// An imported git tree object reference.
+///
+/// If SUBMODULES is true, submodules in this tree and its descendants are included.
+///
+/// If SUBMODULES is false, submodules in this tree and its descendants are dropped.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct GitTree(pub ObjectId);
+pub struct GitTree<const SUBMODULES: bool>(pub ObjectId);
 
+/// An imported git leaf object reference (blob or submodule).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct GitLeaf(pub ObjectId);
 
-pub struct GitManifest(HashMap<MPathElement, Entry<GitTree, (FileType, GitLeaf)>>);
+/// An imported git tree in manifest form.
+///
+/// If SUBMODULES is true, submodules in this tree and its descendants are included.
+///
+/// If SUBMODULES is false, submodules in this tree and its descendants are dropped.
+pub struct GitManifest<const SUBMODULES: bool>(
+    HashMap<MPathElement, Entry<GitTree<SUBMODULES>, (FileType, GitLeaf)>>,
+);
 
-impl Manifest for GitManifest {
-    type TreeId = GitTree;
+impl<const SUBMODULES: bool> Manifest for GitManifest<SUBMODULES> {
+    type TreeId = GitTree<SUBMODULES>;
     type LeafId = (FileType, GitLeaf);
 
     fn lookup(&self, name: &MPathElement) -> Option<Entry<Self::TreeId, Self::LeafId>> {
@@ -73,7 +89,7 @@ impl Manifest for GitManifest {
     }
 }
 
-async fn read_tree(reader: &GitRepoReader, oid: &git_hash::oid) -> Result<Tree, Error> {
+async fn read_tree(reader: &GitRepoReader, oid: &gix_hash::oid) -> Result<Tree, Error> {
     let object = reader.get_object(oid).await?;
     object
         .parsed
@@ -81,7 +97,10 @@ async fn read_tree(reader: &GitRepoReader, oid: &git_hash::oid) -> Result<Tree, 
         .map_err(|_| format_err!("{} is not a tree", oid))
 }
 
-async fn load_git_tree(oid: &git_hash::oid, reader: &GitRepoReader) -> Result<GitManifest, Error> {
+async fn load_git_tree<const SUBMODULES: bool>(
+    oid: &gix_hash::oid,
+    reader: &GitRepoReader,
+) -> Result<GitManifest<SUBMODULES>, Error> {
     let tree = read_tree(reader, oid).await?;
 
     let elements = tree
@@ -110,11 +129,18 @@ async fn load_git_tree(oid: &git_hash::oid, reader: &GitRepoReader) -> Result<Gi
                     }
                     tree::EntryMode::Tree => Some((name, Entry::Tree(GitTree(oid)))),
 
-                    // git-sub-modules are represented as ObjectType::Commit inside the tree.
-                    // For now we do not support git-sub-modules but we still need to import
-                    // repositories that has sub-modules in them (just not synchronized), so
-                    // ignoring any sub-module for now.
-                    tree::EntryMode::Commit => None,
+                    // Git submodules are represented as ObjectType::Commit inside the tree.
+                    //
+                    // Depending on the repository configuration, we may or may not wish to
+                    // include submodules in the imported manifest.  Generate a leaf on the
+                    // basis of the SUBMODULES parameter.
+                    tree::EntryMode::Commit => {
+                        if SUBMODULES {
+                            Some((name, Entry::Leaf((FileType::GitSubmodule, GitLeaf(oid)))))
+                        } else {
+                            None
+                        }
+                    }
                 };
                 anyhow::Ok(r).transpose()
             },
@@ -125,15 +151,15 @@ async fn load_git_tree(oid: &git_hash::oid, reader: &GitRepoReader) -> Result<Gi
 }
 
 #[async_trait]
-impl StoreLoadable<GitRepoReader> for GitTree {
-    type Value = GitManifest;
+impl<const SUBMODULES: bool> StoreLoadable<GitRepoReader> for GitTree<SUBMODULES> {
+    type Value = GitManifest<SUBMODULES>;
 
     async fn load<'a>(
         &'a self,
         _ctx: &'a CoreContext,
         reader: &'a GitRepoReader,
     ) -> Result<Self::Value, LoadableError> {
-        load_git_tree(&self.0, reader)
+        load_git_tree::<SUBMODULES>(&self.0, reader)
             .await
             .map_err(LoadableError::from)
     }
@@ -146,6 +172,8 @@ pub struct GitimportPreferences {
     /// useful when several repos are imported simultainously.
     pub gitrepo_name: Option<String>,
     pub concurrency: usize,
+    /// Whether submodules should be imported instead of dropped.
+    pub submodules: bool,
     pub lfs: GitImportLfs,
     pub git_command_path: PathBuf,
 }
@@ -156,13 +184,14 @@ impl Default for GitimportPreferences {
             dry_run: false,
             gitrepo_name: None,
             concurrency: 20,
+            submodules: true,
             lfs: GitImportLfs::default(),
             git_command_path: PathBuf::from("/usr/bin/git.real"),
         }
     }
 }
 
-pub fn oid_to_sha1(oid: &git_hash::oid) -> Result<hash::GitSha1, Error> {
+pub fn oid_to_sha1(oid: &gix_hash::oid) -> Result<hash::GitSha1, Error> {
     hash::GitSha1::from_bytes(oid.as_bytes())
 }
 
@@ -345,12 +374,12 @@ pub struct CommitMetadata {
 
 pub struct ExtractedCommit {
     pub metadata: CommitMetadata,
-    pub tree: GitTree,
-    pub parent_trees: HashSet<GitTree>,
+    pub tree_oid: ObjectId,
+    pub parent_tree_oids: HashSet<ObjectId>,
     pub original_commit: Bytes,
 }
 
-pub(crate) async fn read_tag(reader: &GitRepoReader, oid: &git_hash::oid) -> Result<Tag, Error> {
+pub(crate) async fn read_tag(reader: &GitRepoReader, oid: &gix_hash::oid) -> Result<Tag, Error> {
     let object = reader.get_object(oid).await?;
     object
         .parsed
@@ -360,7 +389,7 @@ pub(crate) async fn read_tag(reader: &GitRepoReader, oid: &git_hash::oid) -> Res
 
 pub(crate) async fn read_commit(
     reader: &GitRepoReader,
-    oid: &git_hash::oid,
+    oid: &gix_hash::oid,
 ) -> Result<Commit, Error> {
     let object = reader.get_object(oid).await?;
     object
@@ -371,7 +400,7 @@ pub(crate) async fn read_commit(
 
 pub(crate) async fn read_raw_object(
     reader: &GitRepoReader,
-    oid: &git_hash::oid,
+    oid: &gix_hash::oid,
 ) -> Result<Bytes, Error> {
     reader
         .get_object(oid)
@@ -380,7 +409,7 @@ pub(crate) async fn read_raw_object(
         .with_context(|| format!("Error while fetching Git object for ID {}", oid))
 }
 
-fn format_signature(sig: git_actor::SignatureRef) -> String {
+fn format_signature(sig: gix_actor::SignatureRef) -> String {
     format!("{} <{}>", sig.name, sig.email)
 }
 
@@ -441,13 +470,12 @@ impl ExtractedCommit {
             ..
         } = read_commit(reader, &oid).await?;
 
-        let tree = GitTree(tree);
-
-        let parent_trees = {
+        let tree_oid = tree;
+        let parent_tree_oids = {
             let mut trees = HashSet::new();
             for parent in &parents {
                 let commit = read_commit(reader, parent).await?;
-                trees.insert(GitTree(commit.tree));
+                trees.insert(commit.tree);
             }
             trees
         };
@@ -480,17 +508,75 @@ impl ExtractedCommit {
                 committer_date,
                 git_extra_headers,
             },
-            tree,
-            parent_trees,
+            tree_oid,
+            parent_tree_oids,
         })
+    }
+
+    /// Generic version of `diff` based on whether submodules are
+    /// included or not.
+    fn diff_for_submodules<const SUBMODULES: bool>(
+        &self,
+        ctx: &CoreContext,
+        reader: &GitRepoReader,
+    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>> {
+        let tree = GitTree::<SUBMODULES>(self.tree_oid);
+        let parent_trees = self
+            .parent_tree_oids
+            .iter()
+            .cloned()
+            .map(GitTree::<SUBMODULES>)
+            .collect();
+        bonsai_diff(ctx.clone(), reader.clone(), tree, parent_trees)
+    }
+
+    /// Compare the commit against its parents and return all bonsai changes
+    /// that it includes.
+    pub fn diff(
+        &self,
+        ctx: &CoreContext,
+        reader: &GitRepoReader,
+        submodules: bool,
+    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>> {
+        if submodules {
+            self.diff_for_submodules::<true>(ctx, reader).left_stream()
+        } else {
+            self.diff_for_submodules::<false>(ctx, reader)
+                .right_stream()
+        }
+    }
+
+    /// Generic version of `diff_root` based on whether submodules are
+    /// included or not.
+    fn diff_root_for_submodules<const SUBMODULES: bool>(
+        &self,
+        ctx: &CoreContext,
+        reader: &GitRepoReader,
+    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>> {
+        let tree = GitTree::<SUBMODULES>(self.tree_oid);
+        bonsai_diff(ctx.clone(), reader.clone(), tree, HashSet::new())
+    }
+
+    /// Return all of the bonsai changes that this commit includes, as if it
+    /// is a root commit (i.e. compare it against an empty tree).
+    pub fn diff_root(
+        &self,
+        ctx: &CoreContext,
+        reader: &GitRepoReader,
+        submodules: bool,
+    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>> {
+        if submodules {
+            self.diff_root_for_submodules::<true>(ctx, reader)
+                .left_stream()
+        } else {
+            self.diff_root_for_submodules::<false>(ctx, reader)
+                .right_stream()
+        }
     }
 }
 
-pub fn convert_time_to_datetime(time: &git_actor::Time) -> Result<DateTime, Error> {
-    DateTime::from_timestamp(
-        time.seconds_since_unix_epoch.into(),
-        -time.offset_in_seconds,
-    )
+pub fn convert_time_to_datetime(time: &gix_date::Time) -> Result<DateTime, Error> {
+    DateTime::from_timestamp(time.seconds, -time.offset)
 }
 
 #[async_trait]
@@ -510,7 +596,7 @@ pub trait GitUploader: Clone + Send + Sync + 'static {
     async fn check_commit_uploaded(
         &self,
         ctx: &CoreContext,
-        oid: &git_hash::oid,
+        oid: &gix_hash::oid,
     ) -> Result<Option<ChangesetId>, Error>;
 
     /// Upload a single file to the repo

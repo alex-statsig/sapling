@@ -122,8 +122,8 @@ export class ImportStackOperation extends Operation {
             // Replace existingInfo.
             parents,
             title: commit.text.trimStart().split('\n', 1).at(0) || '',
-            author: commit.author,
-            date: new Date(commit.date[0] * 1000),
+            author: commit.author ?? '',
+            date: commit.date == null ? new Date() : new Date(commit.date[0] * 1000),
             description: commit.text,
             isHead: this.gotoMark ? commit.mark === this.gotoMark : existingInfo?.isHead ?? false,
             totalFileCount: Object.keys(commit.files).length,
@@ -162,7 +162,6 @@ export class ImportStackOperation extends Operation {
       }
     };
 
-    // Figure out the tree that
     // Hide duplicated stack
     return func;
   }

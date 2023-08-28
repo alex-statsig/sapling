@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import textwrap
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 
 def transform(
@@ -51,6 +51,7 @@ def transform(
     prefix: str = "",
     filename: str = "",
     hasfeature: Optional[Callable[[str], bool]] = None,
+    registertestcase: Optional[Callable[[str], None]] = None,
 ) -> str:
     r"""transform .t test code to Python code
 
@@ -135,7 +136,13 @@ def transform(
             #endif
         <BLANKLINE>
     """
-    code = rewriteblocks(code, prefix=prefix, filename=filename, hasfeature=hasfeature)
+    code = rewriteblocks(
+        code,
+        prefix=prefix,
+        filename=filename,
+        hasfeature=hasfeature,
+        registertestcase=registertestcase,
+    )
     if indent:
         code = textwrap.indent(code, " " * indent)
     return code
@@ -182,6 +189,7 @@ def rewriteblocks(
     prefix: str = "",
     filename: str = "",
     hasfeature: Optional[Callable[[str], bool]] = None,
+    registertestcase: Optional[Callable[[str], None]] = None,
 ) -> str:
     r"""rewrite "obvious" blocks (ex. '$', '>>>') to python code
 
@@ -241,6 +249,14 @@ def rewriteblocks(
         ... #endif
         ...   $ echo 5
         ...   5
+        ... #if no-tar
+        ...   $ echo 6
+        ...   6
+        ... #if foo
+        ...   $ echo 7
+        ...   7
+        ... #endif
+        ... #endif
         ... end''', hasfeature=lambda f: f in ['git', 'fsmonitor', 'tar']))
         raise __import__("unittest").SkipTest('missing feature: no-windows')
         <BLANKLINE>
@@ -257,6 +273,47 @@ def rewriteblocks(
         #endif
         <BLANKLINE>
         checkoutput(sheval('echo 5\n'), '5\n', src='$ echo 5\n', srcloc=16, outloc=17, endloc=18, indent=2, filename='')
+        <BLANKLINE>
+        #if no-tar
+        <BLANKLINE>
+        #endif
+        <BLANKLINE>
+        # end
+
+    #testcases and associated #if macros are evaluated at runtime
+
+        >>> print(rewriteblocks('''#testcases case1 case2
+        ... #if case1
+        ...   $ echo case1
+        ... #else
+        ...   $ echo not case1
+        ... #endif
+        ... #if case2
+        ...   $ echo case2
+        ... #endif
+        ...   $ echo shared
+        ... end''', registertestcase=lambda _case: None))
+        #if case1
+        <BLANKLINE>
+        if _testcase == 'case1':
+        <BLANKLINE>
+            checkoutput(sheval('echo case1\n'), '', src='$ echo case1\n', srcloc=2, outloc=3, endloc=3, indent=2, filename='')
+        <BLANKLINE>
+        #else
+        else:
+        <BLANKLINE>
+            checkoutput(sheval('echo not case1\n'), '', src='$ echo not case1\n', srcloc=4, outloc=5, endloc=5, indent=2, filename='')
+        <BLANKLINE>
+        #endif
+        #if case2
+        <BLANKLINE>
+        if _testcase == 'case2':
+        <BLANKLINE>
+            checkoutput(sheval('echo case2\n'), '', src='$ echo case2\n', srcloc=7, outloc=8, endloc=8, indent=2, filename='')
+        <BLANKLINE>
+        #endif
+        <BLANKLINE>
+        checkoutput(sheval('echo shared\n'), '', src='$ echo shared\n', srcloc=9, outloc=10, endloc=10, indent=2, filename='')
         <BLANKLINE>
         # end
 
@@ -279,15 +336,31 @@ def rewriteblocks(
         lastblocktype = blocktype
 
     # "#if" support:
-    # - None: no "#if"
+    # conditionstack is used for keeping a stack of "#if" results.
+    # Each element it contains has a pair of bools that shows the result of
+    # evaluating the last "#if" value on the first part of the value and the
+    # result of "and"ing all the first values on the stack on the second one.
+    # The meaning of these values is as follow:
     # - True: lines should be taken until #else or #endif
     # - False: lines should be ignored until #else or #endif
-    conditionstack = []
+    # If it's empty, it means there are no "#if"s.
+    conditionstack: List[Tuple[bool, bool]] = []
+
+    def conditionstacktopeval() -> bool:
+        nonlocal conditionstack
+        return conditionstack[-1][1] if conditionstack else True
+
+    extraindent = 0
 
     def appendline(line):
-        condition = conditionstack[-1] if conditionstack else None
-        if condition is not False:
+        if conditionstacktopeval():
+            if extraindent:
+                line = " " * (4 * extraindent) + line
             newlines.append(line)
+
+    ifstack = []
+
+    testcases = []
 
     while i < n:
         info = lineinfos[i]
@@ -334,26 +407,54 @@ def rewriteblocks(
             if missing:
                 msg = f"missing feature: {' '.join(missing)}"
                 appendline(f'raise __import__("unittest").SkipTest({repr(msg)})\n')
+        elif info.line.startswith("#testcases "):
+            assert registertestcase is not None
+            newcases = info.line.split()[1:]
+            for testcase in newcases:
+                registertestcase(testcase)
+            testcases.extend(newcases)
         elif info.line.startswith("#if "):
             maybeseparate("if")
-            features = info.line[4:].split()
+            rawfeatures = info.line[4:].strip()
+            features = rawfeatures.split()
             appendline(info.line)
-            if hasfeature and all(hasfeature(f) for f in features):
+            ifstack.append(rawfeatures)
+
+            if rawfeatures in testcases:
+                maybeseparate("python")
+                appendline(f"if _testcase == '{rawfeatures}':\n")
+                extraindent += 1
+                condition = True
+            elif hasfeature and all(hasfeature(f) for f in features):
                 condition = True
             else:
                 condition = False
-            conditionstack.append(condition)
+            conditionstack.append((condition, condition and conditionstacktopeval()))
         elif info.line == "#else\n":
             maybeseparate("if")
-            if conditionstack:
-                conditionstack[-1] = not conditionstack[-1]
-            appendline(info.line)
+            if ifstack[-1] in testcases:
+                maybeseparate("python")
+                extraindent -= 1
+                appendline(info.line)
+                appendline(f"else:\n")
+                extraindent += 1
+            elif conditionstack:
+                condition = not conditionstack[-1][0]
+                conditionstack.pop()
+                conditionstack.append(
+                    (condition, condition and conditionstacktopeval())
+                )
+                appendline(info.line)
         elif info.line == "#endif\n":
             maybeseparate("if")
             try:
                 conditionstack.pop()
             except IndexError as e:
                 raise e
+
+            if ifstack.pop() in testcases:
+                extraindent -= 1
+
             appendline(info.line)
         elif info.line.strip():
             assert (

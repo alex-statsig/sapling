@@ -16,6 +16,7 @@ async-trait = "0.1.71"
 basename_suffix_skeleton_manifest = { version = "0.1.0", path = "../basename_suffix_skeleton_manifest" }
 blame = { version = "0.1.0", path = "../blame" }
 blobstore = { version = "0.1.0", path = "../../blobstore" }
+bonsai_git_mapping = { version = "0.1.0", path = "../../bonsai_git_mapping" }
 bonsai_hg_mapping = { version = "0.1.0", path = "../../bonsai_hg_mapping" }
 bounded_traversal = { version = "0.1.0", path = "../../common/bounded_traversal" }
 changeset_fetcher = { version = "0.1.0", path = "../../blobrepo/changeset_fetcher" }
@@ -36,6 +37,7 @@ fsnodes = { version = "0.1.0", path = "../fsnodes" }
 futures = { version = "0.3.28", features = ["async-await", "compat"] }
 futures_stats = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 git_types = { version = "0.1.0", path = "../../git/git_types" }
+itertools = "0.10.3"
 lazy_static = "1.4"
 lock_ext = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 manifest = { version = "0.1.0", path = "../../manifest" }
@@ -48,7 +50,7 @@ repo_identity = { version = "0.1.0", path = "../../repo_attributes/repo_identity
 scuba_ext = { version = "0.1.0", path = "../../common/scuba_ext" }
 skeleton_manifest = { version = "0.1.0", path = "../skeleton_manifest" }
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
-tokio = { version = "1.25.0", features = ["full", "test-util", "tracing"] }
+tokio = { version = "1.29.1", features = ["full", "test-util", "tracing"] }
 topo_sort = { version = "0.1.0", path = "../../common/topo_sort" }
 unodes = { version = "0.1.0", path = "../unodes" }
 

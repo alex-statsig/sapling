@@ -9,10 +9,12 @@ import type {MessageBusStatus} from './MessageBus';
 import type {CommitTree} from './getCommitTree';
 import type {Operation} from './operations/Operation';
 import type {
+  ApplicationInfo,
   ChangedFile,
   CommitInfo,
   Hash,
   MergeConflicts,
+  ProgressStep,
   RepoInfo,
   SmartlogCommits,
   SubscriptionKind,
@@ -24,12 +26,14 @@ import type {EnsureAssignedTogether} from 'shared/EnsureAssignedTogether';
 
 import serverAPI from './ClientToServerAPI';
 import messageBus from './MessageBus';
+import {successionTracker} from './SuccessionTracker';
 import {getCommitTree, walkTreePostorder} from './getCommitTree';
 import {persistAtomToConfigEffect} from './persistAtomToConfigEffect';
 import {clearOnCwdChange} from './recoilUtils';
 import {initialParams} from './urlParams';
+import {short} from './utils';
 import {DEFAULT_DAYS_OF_COMMITS_TO_LOAD} from 'isl-server/src/constants';
-import {atom, DefaultValue, selector, useRecoilCallback} from 'recoil';
+import {selectorFamily, atom, DefaultValue, selector, useRecoilCallback} from 'recoil';
 import {randomId} from 'shared/utils';
 
 const repositoryData = atom<{info: RepoInfo | undefined; cwd: string | undefined}>({
@@ -65,13 +69,13 @@ export const repositoryInfo = selector<RepoInfo | undefined>({
   },
 });
 
-export const applicationinfo = atom<{platformName: string; version: string} | undefined>({
+export const applicationinfo = atom<ApplicationInfo | undefined>({
   key: 'applicationinfo',
   default: undefined,
   effects: [
     ({setSelf}) => {
       const disposable = serverAPI.onMessageOfType('applicationInfo', event => {
-        setSelf(event);
+        setSelf(event.info);
       });
       return () => disposable.dispose();
     },
@@ -174,8 +178,24 @@ export const latestCommitsData = atom<{
           [],
         error: data.commits.error,
       }));
+      if (data.commits.value) {
+        successionTracker.findNewSuccessionsFromCommits(data.commits.value);
+      }
     }),
   ],
+});
+
+/**
+ * Lookup a commit by hash, *WITHOUT PREVIEWS*.
+ * Generally, you'd want to look up WITH previews, which you can use treeWithPreviews for.
+ */
+export const commitByHash = selectorFamily<CommitInfo | undefined, string>({
+  key: 'commitByHash',
+  get:
+    (hash: string) =>
+    ({get}) => {
+      return get(latestCommits).find(commit => commit.hash === hash);
+    },
 });
 
 export const latestCommits = selector<Array<CommitInfo>>({
@@ -374,11 +394,16 @@ export const latestCommitTreeMap = selector<Map<Hash, CommitTree>>({
   },
 });
 
+/**
+ * No longer in the "loading" state:
+ * - Either the list of commits has successfully loaded
+ * - or there was an error during the fetch
+ */
 export const haveCommitsLoadedYet = selector<boolean>({
   key: 'haveCommitsLoadedYet',
   get: ({get}) => {
-    const commits = get(latestCommits);
-    return commits.length > 0;
+    const data = get(latestCommitsData);
+    return data.commits.length > 0 || data.error != null;
   },
 });
 
@@ -401,6 +426,9 @@ export type OperationInfo = {
   operation: Operation;
   startTime?: Date;
   commandOutput?: Array<string>;
+  currentProgress?: ProgressStep;
+  /** progress message shown next to a commit */
+  inlineProgress?: Map<Hash, string>;
   /** if true, we have sent "abort" request, the process might have exited or is going to exit soon */
   aborting?: boolean;
   /** if true, the operation process has exited AND there's no more optimistic commit state to show */
@@ -436,7 +464,14 @@ function startNewOperation(newOperation: Operation, list: OperationList): Operat
     if (list.currentOperation != null) {
       operationHistory.push(list.currentOperation);
     }
-    const currentOperation = {operation: newOperation, startTime: new Date()};
+    const inlineProgress: Array<[string, string]> | undefined = newOperation
+      .getInitialInlineProgress?.()
+      ?.map(([k, v]) => [short(k), v]); // inline progress is keyed by short hashes, but let's do that conversion on behalf of operations.
+    const currentOperation: OperationInfo = {
+      operation: newOperation,
+      startTime: new Date(),
+      inlineProgress: inlineProgress == null ? undefined : new Map(inlineProgress),
+    };
     return {...list, operationHistory, currentOperation};
   }
 }
@@ -476,6 +511,73 @@ export const operationList = atom<OperationList>({
                 currentOperation: {
                   ...currentOperation,
                   commandOutput: [...(currentOperation?.commandOutput ?? []), progress.message],
+                  currentProgress: undefined, // hide progress on new stdout, so it doesn't appear stuck
+                },
+              };
+            });
+            break;
+          case 'inlineProgress':
+            setSelf(current => {
+              if (current == null || current instanceof DefaultValue) {
+                return current;
+              }
+              const currentOperation = current.currentOperation;
+              if (currentOperation == null) {
+                return current;
+              }
+
+              let inlineProgress: undefined | Map<string, string> =
+                current.currentOperation?.inlineProgress ?? new Map();
+              if (progress.hash) {
+                if (progress.message) {
+                  inlineProgress.set(progress.hash, progress.message);
+                } else {
+                  inlineProgress.delete(progress.hash);
+                }
+              } else {
+                inlineProgress = undefined;
+              }
+
+              const newCommandOutput = [...(currentOperation?.commandOutput ?? [])];
+              if (progress.hash && progress.message) {
+                // also add inline progress message as if it was on stdout,
+                // so you can see it when reading back the final output
+                newCommandOutput.push(`${progress.hash} - ${progress.message}\n`);
+              }
+
+              return {
+                ...current,
+                currentOperation: {
+                  ...currentOperation,
+                  inlineProgress,
+                },
+              };
+            });
+            break;
+          case 'progress':
+            setSelf(current => {
+              if (current == null || current instanceof DefaultValue) {
+                return current;
+              }
+              const currentOperation = current.currentOperation;
+              if (currentOperation == null) {
+                return current;
+              }
+
+              const newCommandOutput = [...(currentOperation?.commandOutput ?? [])];
+              if (newCommandOutput.at(-1) !== progress.progress.message) {
+                // also add progress message as if it was on stdout,
+                // so you can see it when reading back the final output,
+                // but only if it's a different progress message than we've seen.
+                newCommandOutput.push(progress.progress.message + '\n');
+              }
+
+              return {
+                ...current,
+                currentOperation: {
+                  ...currentOperation,
+                  commandOutput: newCommandOutput,
+                  currentProgress: progress.progress,
                 },
               };
             });
@@ -496,6 +598,7 @@ export const operationList = atom<OperationList>({
                   ...currentOperation,
                   exitCode: progress.exitCode,
                   endTime: new Date(progress.timestamp),
+                  inlineProgress: undefined, // inline progress never lasts after exiting
                 },
               };
             });
@@ -505,6 +608,21 @@ export const operationList = atom<OperationList>({
       return () => disposable.dispose();
     },
   ],
+});
+
+export const inlineProgressByHash = selectorFamily<string | undefined, string>({
+  key: 'inlineProgressByHash',
+  get:
+    (hash: string) =>
+    ({get}) => {
+      const info = get(operationList);
+      const inlineProgress = info.currentOperation?.inlineProgress;
+      if (inlineProgress == null) {
+        return undefined;
+      }
+      const shortHash = short(hash); // progress messages come indexed by short hash
+      return inlineProgress.get(shortHash);
+    },
 });
 
 // We don't send entire operations to the server, since not all fields are serializable.

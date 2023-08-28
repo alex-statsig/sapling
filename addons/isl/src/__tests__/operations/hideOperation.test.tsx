@@ -50,14 +50,14 @@ describe('hide operation', () => {
   }
 
   it('previews hiding a stack of commits', () => {
-    rightClickAndChooseFromContextMenu(screen.getByText('Commit B'), 'Hide Commit and Descendents');
+    rightClickAndChooseFromContextMenu(screen.getByText('Commit B'), 'Hide Commit and Descendants');
 
     expect(document.querySelectorAll('.commit-preview-hidden-root')).toHaveLength(1);
     expect(document.querySelectorAll('.commit-preview-hidden-descendant')).toHaveLength(3);
   });
 
   it('runs hide operation', () => {
-    rightClickAndChooseFromContextMenu(screen.getByText('Commit B'), 'Hide Commit and Descendents');
+    rightClickAndChooseFromContextMenu(screen.getByText('Commit B'), 'Hide Commit and Descendants');
 
     const runHideButton = screen.getByText('Hide');
     expect(runHideButton).toBeInTheDocument();
@@ -75,7 +75,7 @@ describe('hide operation', () => {
   });
 
   it('shows optimistic preview of hide', () => {
-    rightClickAndChooseFromContextMenu(screen.getByText('Commit B'), 'Hide Commit and Descendents');
+    rightClickAndChooseFromContextMenu(screen.getByText('Commit B'), 'Hide Commit and Descendants');
 
     const runHideButton = screen.getByText('Hide');
     fireEvent.click(runHideButton);
@@ -86,5 +86,25 @@ describe('hide operation', () => {
     expect(screen.queryByTestId('commit-c')).not.toBeInTheDocument();
     expect(screen.queryByTestId('commit-d')).not.toBeInTheDocument();
     expect(screen.queryByTestId('commit-e')).not.toBeInTheDocument();
+  });
+
+  it('does not show uninteresting public base during optimistic hide', () => {
+    rightClickAndChooseFromContextMenu(screen.getByText('Commit A'), 'Hide Commit and Descendants');
+
+    const runHideButton = screen.getByText('Hide');
+    fireEvent.click(runHideButton);
+
+    // the whole subtree is hidden, so the parent commit is not even rendered
+    expect(screen.queryByTestId('commit-1')).not.toBeInTheDocument();
+  });
+
+  it('does show interesting public base during optimistic hide', () => {
+    rightClickAndChooseFromContextMenu(screen.getByText('Commit X'), 'Hide Commit and Descendants');
+
+    const runHideButton = screen.getByText('Hide');
+    fireEvent.click(runHideButton);
+
+    // the whole subtree is hidden, but this commit has the remote/master bookmark so it's shown anyway.
+    expect(screen.queryByTestId('commit-2')).toBeInTheDocument();
   });
 });

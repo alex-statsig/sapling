@@ -18,9 +18,8 @@ import re
 from typing import List, Optional, Pattern, Sized, Tuple
 
 from bindings import pathmatcher
-from edenscm.pathutil import pathauditor
 
-from . import error, pathutil, pycompat, util
+from . import error, identity, pathutil, pycompat, util
 from .i18n import _
 from .pycompat import decodeutf8
 
@@ -38,8 +37,6 @@ allpatternkinds = (
     "listfile",
     "listfile0",
     "set",
-    "include",
-    "subinclude",
     "rootfilesin",
 )
 cwdrelativepatternkinds = ("relpath", "glob")
@@ -74,31 +71,6 @@ def _expandsets(kindpats, ctx):
     return fset, other
 
 
-def _expandsubinclude(kindpats, root):
-    """Returns the list of subinclude matcher args and the kindpats without the
-    subincludes in it."""
-    relmatchers = []
-    other = []
-
-    for kind, pat, source in kindpats:
-        if kind == "subinclude":
-            sourceroot = pathutil.dirname(util.normpath(source))
-            pat = util.pconvert(pat)
-            path = pathutil.join(sourceroot, pat)
-
-            newroot = pathutil.dirname(path)
-            matcherargs = (newroot, "", [], ["include:%s" % path])
-
-            prefix = pathutil.canonpath(root, root, newroot)
-            if prefix:
-                prefix += "/"
-            relmatchers.append((prefix, matcherargs))
-        else:
-            other.append((kind, pat, source))
-
-    return relmatchers, other
-
-
 def _kindpatsalwaysmatch(kindpats) -> bool:
     """ "Checks whether the kindspats match everything, as e.g.
     'relpath:.' does.
@@ -106,9 +78,13 @@ def _kindpatsalwaysmatch(kindpats) -> bool:
     if not kindpats:
         return False
 
+    emptymeansalways = {"relpath"}
+    if _emptyglobalwaysmatches:
+        emptymeansalways.add("glob")
+
     for kind, pat, source in kindpats:
         # TODO: update me?
-        if pat != "" or kind not in ["relpath", "glob"]:
+        if pat != "" or kind not in emptymeansalways:
             return False
     return True
 
@@ -120,13 +96,10 @@ def match(
     include=None,
     exclude=None,
     default: str = "glob",
-    exact: bool = False,
-    auditor: Optional[pathauditor] = None,
     ctx=None,
     warn=None,
     badfn=None,
     icasefs: bool = False,
-    emptyalways: bool = True,
 ):
     """build an object to match a set of file patterns
 
@@ -137,13 +110,10 @@ def match(
     include - patterns to include (unless they are excluded)
     exclude - patterns to exclude (even if they are included)
     default - if a pattern in patterns has no explicit type, assume this one
-    exact - patterns are actually filenames (include/exclude still apply)
     warn - optional function used for printing warnings
     badfn - optional bad() callback for this matcher instead of the default
     icasefs - make a matcher for wdir on case insensitive filesystems, which
         normalizes the given patterns to the case in the filesystem
-    emptyalways - decides what matcher to choose if pattern is empty:
-        alwaysmatcher if True, nevermatcher if False
 
     a pattern is one of:
     'glob:<glob>' - a glob relative to cwd
@@ -156,56 +126,56 @@ def match(
     'relpath:<path>' - a path relative to cwd
     'relre:<regexp>' - a regexp that needn't match the start of a name
     'set:<fileset>' - a fileset expression
-    'include:<path>' - a file of patterns to read and include
-    'subinclude:<path>' - a file of patterns to match against files under
-                          the same directory
     '<something>' - a pattern of the specified default type
     """
-    if auditor is None:
-        auditor = pathutil.pathauditor(root)
+
+    if _userustmatcher:
+        hm = hintedmatcher(
+            root,
+            cwd,
+            patterns or [],
+            include or [],
+            exclude or [],
+            default,
+            ctx,
+            casesensitive=not icasefs,
+            badfn=badfn,
+        )
+        if warn:
+            for warning in hm.warnings():
+                warn("warning: " + identity.replace(warning) + "\n")
+        return hm
+
     normalize = _donormalize
     if icasefs:
-        if exact:
-            raise error.ProgrammingError(
-                "a case-insensitive exact matcher " "doesn't make sense"
-            )
         dirstate = ctx.repo().dirstate
         dsnormalize = dirstate.normalize
 
-        def normalize(patterns, default, root, cwd, auditor, warn):
-            kp = _donormalize(patterns, default, root, cwd, auditor, warn)
+        def normalize(patterns, default, root, cwd, warn):
+            kp = _donormalize(patterns, default, root, cwd, warn)
             kindpats = []
-            for kind, pats, source in kp:
+            for kind, pat, source in kp:
                 if kind not in ("re", "relre"):  # regex can't be normalized
-                    p = pats
-                    pats = dsnormalize(pats)
+                    p = pat
+                    pat = dsnormalize(pat)
 
                     # Preserve the original to handle a case only rename.
-                    if p != pats and p in dirstate:
+                    if p != pat and p in dirstate:
                         kindpats.append((kind, p, source))
 
-                kindpats.append((kind, pats, source))
+                kindpats.append((kind, pat, source))
             return kindpats
 
     m = None
-    if exact:
-        m = exactmatcher(root, cwd, patterns, badfn)
-    elif not patterns:
-        # It's a little strange that no patterns means to match everything.
-        # Consider changing this to match nothing (probably using nevermatcher).
-        if emptyalways or include:
-            m = alwaysmatcher(root, cwd, badfn)
-        else:
-            m = nevermatcher(root, cwd, badfn)
+    if not patterns:
+        m = alwaysmatcher(root, cwd, badfn)
 
-    patternskindpats = not m and normalize(patterns, default, root, cwd, auditor, warn)
-    includekindpats = include and normalize(include, "glob", root, cwd, auditor, warn)
-    excludekindpats = exclude and normalize(exclude, "glob", root, cwd, auditor, warn)
+    patternskindpats = not m and normalize(patterns, default, root, cwd, warn)
+    includekindpats = include and normalize(include, "glob", root, cwd, warn)
+    excludekindpats = exclude and normalize(exclude, "glob", root, cwd, warn)
 
     # Try to use Rust dyn matcher if possible. Currently, Rust dyn matcher is
     # missing below features:
-    # * exact matcher
-    # * emptyalways parameter
     # * explicit files in Matcher trait
     # * pattern kinds other than 'glob' and 're'
     if _usedynmatcher and not m:
@@ -345,7 +315,7 @@ def badmatch(match, badfn):
     return m
 
 
-def _donormalize(patterns, default, root, cwd, auditor, warn):
+def _donormalize(patterns, default, root, cwd, warn):
     """Convert 'kind:pat' from the patterns list to tuples with kind and
     normalized and rooted patterns and with listfiles expanded."""
     kindpats = []
@@ -359,7 +329,7 @@ def _donormalize(patterns, default, root, cwd, auditor, warn):
             )
 
         if kind in cwdrelativepatternkinds:
-            pat = pathutil.canonpath(root, cwd, pat, auditor)
+            pat = pathutil.canonpath(root, cwd, pat)
         elif kind in ("relglob", "path", "rootfilesin"):
             pat = util.normpath(pat)
         elif kind in ("listfile", "listfile0"):
@@ -377,26 +347,10 @@ def _donormalize(patterns, default, root, cwd, auditor, warn):
                 if warn:
                     warn(_("empty %s %s matches nothing\n") % (kind, pat))
 
-            for k, p, source in _donormalize(files, default, root, cwd, auditor, warn):
+            for k, p, source in _donormalize(files, default, root, cwd, warn):
                 kindpats.append((k, p, pat))
             continue
-        elif kind == "include":
-            try:
-                fullpath = os.path.join(root, util.localpath(pat))
-                includepats = readpatternfile(fullpath, warn)
-                for k, p, source in _donormalize(
-                    includepats, default, root, cwd, auditor, warn
-                ):
-                    kindpats.append((k, p, source or pat))
-            except error.Abort as inst:
-                raise error.Abort("%s: %s" % (pat, inst[0]))
-            except IOError as inst:
-                if warn:
-                    warn(
-                        _("skipping unreadable pattern file '%s': %s\n")
-                        % (pat, inst.strerror)
-                    )
-            continue
+
         # else: re or relre - which cannot be normalized
         kindpats.append((kind, pat, ""))
     return kindpats
@@ -706,7 +660,7 @@ def _buildvisitdir(kindpats):
     return tree.visitdir
 
 
-class basematcher(object):
+class basematcher:
     def __init__(self, root, cwd, badfn=None, relativeuipath=True):
         self._root = root
         self._cwd = cwd
@@ -784,24 +738,40 @@ class basematcher(object):
         return True
 
     def always(self):
-        """Matcher will match everything and .files() will be empty --
-        optimization might be possible."""
+        """Matcher will match everything and .files() will be empty.
+        Optimization might be possible."""
         return False
 
     def isexact(self):
-        """Matcher will match exactly the list of files in .files() --
-        optimization might be possible."""
+        """Matcher matches exactly the list of files in .files(), and nothing else.
+        Optimization might be possible."""
         return False
 
     def prefix(self):
-        """Matcher will match the paths in .files() recursively --
-        optimization might be possible."""
+        """Matcher matches the paths in .files() recursively, and nothing else.
+        Optimization might be possible."""
         return False
 
     def anypats(self):
-        """None of .always(), .isexact(), and .prefix() is true --
-        optimizations will be difficult."""
-        return not self.always() and not self.isexact() and not self.prefix()
+        """Matcher contains a non-trivial pattern (i.e. non-path and non-always).
+        If this returns False, code assumes files() is all that matters.
+        Optimizations will be difficult."""
+        if self.always():
+            # This is confusing since, conceptually, we are saying
+            # there aren't patterns when we have a pattern like "**".
+            # But since always() implies files() is empty, it is safe
+            # for code to assume files() is all that's important.
+            return False
+
+        if self.isexact():
+            # Only exacty files - no patterns.
+            return False
+
+        if self.prefix():
+            # Only recursive paths - no patterns.
+            return False
+
+        return True
 
 
 class alwaysmatcher(basematcher):
@@ -891,8 +861,7 @@ def rulesmatch(root, cwd, rules, ruledetails=None) -> "treematcher":
         else:
             strippedrules.append(rule)
 
-    auditor = pathutil.pathauditor(root)
-    kindpats = _donormalize(strippedrules, "glob", root, cwd, auditor, None)
+    kindpats = _donormalize(strippedrules, "glob", root, cwd, None)
     globs = _kindpatstoglobs(kindpats, recursive=True)
     if globs is None:
         raise error.Abort(
@@ -985,6 +954,82 @@ class regexmatcher(basematcher):
 
     def __repr__(self):
         return f"<regexmatcher pattern={self._pattern!r}>"
+
+
+class hintedmatcher(basematcher):
+    """Rust matcher fully implementing Python API."""
+
+    def __init__(
+        self,
+        root,
+        cwd,
+        patterns: List[str],
+        include: List[str],
+        exclude: List[str],
+        default: str,
+        ctx,
+        casesensitive: bool,
+        badfn=None,
+    ):
+        super(hintedmatcher, self).__init__(
+            root, cwd, badfn, relativeuipath=bool(patterns or include or exclude)
+        )
+
+        def expandsets(pats, default):
+            fset, nonsets = set(), []
+            for pat in pats:
+                k, p = _patsplit(pat, default)
+                if k == "set":
+                    if not ctx:
+                        raise error.ProgrammingError(
+                            "fileset expression with no " "context"
+                        )
+                    fset.update(ctx.getfileset(p))
+                else:
+                    nonsets.append(pat)
+
+            if len(nonsets) == len(pats):
+                return nonsets, None
+            else:
+                return nonsets, list(fset)
+
+        self._matcher = pathmatcher.hintedmatcher(
+            *expandsets(patterns, default),
+            *expandsets(include, "glob"),
+            *expandsets(exclude, "glob"),
+            default,
+            casesensitive,
+            root,
+            cwd,
+        )
+        self._files = self._matcher.exact_files()
+
+    def matchfn(self, f):
+        return self._matcher.matches_file(f)
+
+    def visitdir(self, dir):
+        matched = self._matcher.matches_directory(dir)
+        if matched is None:
+            return True
+        elif matched is True:
+            return "all"
+        else:
+            assert matched is False, f"expected False, but got {matched}"
+            return False
+
+    def always(self):
+        return self._matcher.always_matches()
+
+    def prefix(self):
+        return self._matcher.all_recursive_paths()
+
+    def isexact(self):
+        # Similar to nevermatcher, let the knowledge that we never match
+        # allow isexact() fast paths.
+        return self._matcher.never_matches()
+
+    def warnings(self):
+        return self._matcher.warnings()
 
 
 class dynmatcher(basematcher):
@@ -1469,90 +1514,6 @@ class intersectionmatcher(basematcher):
         return "<intersectionmatcher m1=%r, m2=%r>" % (self._m1, self._m2)
 
 
-class subdirmatcher(basematcher):
-    """Adapt a matcher to work on a subdirectory only.
-
-    The paths are remapped to remove/insert the path as needed:
-
-    >>> import os
-    >>> from . import pycompat
-    >>> m1 = match(os.getcwd(), '', ['a.txt', 'sub/b.txt'])
-    >>> m2 = subdirmatcher('sub', m1)
-    >>> bool(m2('a.txt'))
-    False
-    >>> bool(m2('b.txt'))
-    True
-    >>> bool(m2.matchfn('a.txt'))
-    False
-    >>> bool(m2.matchfn('b.txt'))
-    True
-    >>> m2.files()
-    ['b.txt']
-    >>> m2.exact('b.txt')
-    True
-    >>> util.pconvert(m2.rel('b.txt'))
-    'sub/b.txt'
-    >>> def bad(f, msg):
-    ...     print("%s: %s" % (f, msg))
-    >>> m1.bad = bad
-    >>> m2.bad('x.txt', 'No such file')
-    sub/x.txt: No such file
-    >>> m2.abs('c.txt')
-    'sub/c.txt'
-    """
-
-    def __init__(self, path, matcher):
-        super(subdirmatcher, self).__init__(matcher._root, matcher._cwd)
-        self._path = path
-        self._matcher = matcher
-        self._always = matcher.always()
-
-        self._files = [
-            f[len(path) + 1 :] for f in matcher._files if f.startswith(path + "/")
-        ]
-
-        # If the parent repo had a path to this subrepo and the matcher is
-        # a prefix matcher, this submatcher always matches.
-        if matcher.prefix():
-            self._always = any(f == path for f in matcher._files)
-
-    def bad(self, f, msg):
-        self._matcher.bad(self._path + "/" + f, msg)
-
-    def abs(self, f):
-        return self._matcher.abs(self._path + "/" + f)
-
-    def rel(self, f):
-        return self._matcher.rel(self._path + "/" + f)
-
-    def uipath(self, f):
-        return self._matcher.uipath(self._path + "/" + f)
-
-    def matchfn(self, f):
-        # Some information is lost in the superclass's constructor, so we
-        # can not accurately create the matching function for the subdirectory
-        # from the inputs. Instead, we override matchfn() and visitdir() to
-        # call the original matcher with the subdirectory path prepended.
-        return self._matcher.matchfn(self._path + "/" + f)
-
-    def visitdir(self, dir):
-        dir = normalizerootdir(dir, "visitdir")
-        if dir == "":
-            dir = self._path
-        else:
-            dir = self._path + "/" + dir
-        return self._matcher.visitdir(dir)
-
-    def always(self):
-        return self._always
-
-    def prefix(self):
-        return self._matcher.prefix() and not self._always
-
-    def __repr__(self):
-        return "<subdirmatcher path=%r, matcher=%r>" % (self._path, self._matcher)
-
-
 class unionmatcher(basematcher):
     """A matcher that is the union of several matchers.
 
@@ -1641,29 +1602,6 @@ class xormatcher(basematcher):
 
     def __repr__(self):
         return "<xormatcher matchers=%r>" % self._matchers
-
-
-class recursivematcher(basematcher):
-    """Make matchers recursive. If "a/b/c" matches, match "a/b/c/**".
-
-    It is intended to be used by hgignore only. Other matchers would want to
-    fix "visitdir" and "matchfn" to take parent directories into consideration.
-    """
-
-    def __init__(self, matcher):
-        self._matcher = matcher
-
-    def matchfn(self, f):
-        match = self._matcher
-        return match(f) or any(map(match, util.dirs((f,))))
-
-    def visitdir(self, dir):
-        if self(dir):
-            return "all"
-        return self._matcher.visitdir(dir)
-
-    def __repr__(self):
-        return "<recursivematcher %r>" % self._matcher
 
 
 def patkind(pattern, default=None):
@@ -1798,24 +1736,6 @@ def _buildmatch(ctx, kindpats, globsuffix, root):
     """Return regexp string and a matcher function for kindpats.
     globsuffix is appended to the regexp of globs."""
     matchfuncs = []
-
-    subincludes, kindpats = _expandsubinclude(kindpats, root)
-    if subincludes:
-        submatchers = {}
-
-        def matchsubinclude(f):
-            for prefix, matcherargs in subincludes:
-                if f.startswith(prefix):
-                    mf = submatchers.get(prefix)
-                    if mf is None:
-                        mf = match(*matcherargs)
-                        submatchers[prefix] = mf
-
-                    if mf(f[len(prefix) :]):
-                        return True
-            return False
-
-        matchfuncs.append(matchsubinclude)
 
     fset, kindpats = _expandsets(kindpats, ctx)
     if fset:
@@ -1963,87 +1883,11 @@ def _prefix(kindpats) -> bool:
     return True
 
 
-_commentre = None
-
-
-def readpatternfile(filepath, warn, sourceinfo: bool = False):
-    """parse a pattern file, returning a list of
-    patterns. These patterns should be given to compile()
-    to be validated and converted into a match function.
-
-    trailing white space is dropped.
-    the escape character is backslash.
-    comments start with #.
-    empty lines are skipped.
-
-    lines can be of the following formats:
-
-    syntax: regexp # defaults following lines to non-rooted regexps
-    syntax: glob   # defaults following lines to non-rooted globs
-    re:pattern     # non-rooted regular expression
-    glob:pattern   # non-rooted glob
-    pattern        # pattern of the current default type
-
-    if sourceinfo is set, returns a list of tuples:
-    (pattern, lineno, originalline). This is useful to debug ignore patterns.
-    """
-
-    syntaxes = {
-        "re": "relre:",
-        "regexp": "relre:",
-        "glob": "relglob:",
-        "include": "include",
-        "subinclude": "subinclude",
-    }
-    syntax = "relre:"
-    patterns = []
-
-    fp = open(filepath, "rb")
-    for lineno, line in enumerate(util.iterfile(fp), start=1):
-        if "#" in line:
-            global _commentre
-            if not _commentre:
-                _commentre = util.re.compile(rb"((?:^|[^\\])(?:\\\\)*)#.*")
-            # remove comments prefixed by an even number of escapes
-            m = _commentre.search(line)
-            if m:
-                line = line[: m.end(1)]
-            # fixup properly escaped comments that survived the above
-            line = line.replace("\\#", "#")
-        line = line.rstrip()
-        if not line:
-            continue
-
-        if line.startswith("syntax:"):
-            s = line[7:].strip()
-            try:
-                syntax = syntaxes[s]
-            except KeyError:
-                if warn:
-                    warn(_("%s: ignoring invalid syntax '%s'\n") % (filepath, s))
-            continue
-
-        linesyntax = syntax
-        for s, rels in pycompat.iteritems(syntaxes):
-            if line.startswith(rels):
-                linesyntax = rels
-                line = line[len(rels) :]
-                break
-            elif line.startswith(s + ":"):
-                linesyntax = rels
-                line = line[len(s) + 1 :]
-                break
-        if sourceinfo:
-            patterns.append((linesyntax + line, lineno, line))
-        else:
-            patterns.append(linesyntax + line)
-    fp.close()
-    return patterns
-
-
 _usetreematcher = True
 _useregexmatcher = True
 _usedynmatcher = True
+_emptyglobalwaysmatches = False
+_userustmatcher = False
 
 
 def init(ui) -> None:
@@ -2053,3 +1897,7 @@ def init(ui) -> None:
     _useregexmatcher = ui.configbool("experimental", "regexmatcher")
     global _usedynmatcher
     _usedynmatcher = ui.configbool("experimental", "dynmatcher")
+    global _emptyglobalwaysmatches
+    _emptyglobalwaysmatches = ui.configbool("experimental", "empty-glob-always-matches")
+    global _userustmatcher
+    _userustmatcher = ui.configbool("experimental", "rustmatcher")

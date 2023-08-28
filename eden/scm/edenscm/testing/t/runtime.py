@@ -92,7 +92,11 @@ def checkoutput(
     """
     hasfeature = sys._getframe(1).f_globals.get("hasfeature")
     matcher = MultiLineMatcher(b, hasfeature)
-    if not matcher.match(a):
+    # AssertionError usually means the test is already broken.
+    # Report it as a mismatch to fail the test. Note: we don't raise here
+    # to provide better error messages (ex. show line number of the assertion)
+    force_mismatch = a.startswith("AssertionError")
+    if force_mismatch or not matcher.match(a):
         a, b = matcher.normalize(a)
         # collect the output mismatch in 'mismatchmap'
         mismatch = Mismatch(
@@ -246,6 +250,7 @@ class TestTmp:
         self._updateglobalstate = updateglobalstate
         self._origpathenv = os.getenv("PATH") or os.defpath
         self._setup(tmpprefix)
+        self._lastout = ""
 
     def atexit(self, func):
         # register a function to be called during tearing down
@@ -271,26 +276,44 @@ class TestTmp:
             if not reason:
                 reason = f"{code.strip()} exited 80"
             raise unittest.SkipTest(reason)
+        self._lastout = out
         return out
 
     def pydoceval(self, code: str, mode: str = "single") -> Optional[str]:
-        """evalualte python code in this TestTmp context"""
+        """evaluate python code in this TestTmp context"""
         f = sys._getframe(1)
         origout = sys.stdout
         sys.stdout = io.StringIO()
         try:
             compiled = compile(code, "<pydoceval>", mode)
+            # Mutating globals() works, but not locals() (it works at the module
+            # level because locals() is globals()). We aren't at the module
+            # scope because we are inside the _run_once function.
+            #
+            # Work around by passing in globals() as exec's locals so newly
+            # defined variables will become globals. To make the actual locals
+            # available, we mix them into globals_env.
+
+            # Provide "_" as the output from the last command.
+            globals_env = {**f.f_globals, "_": self._lastout, **f.f_locals}
             with shext.shellenv(self.shenv):
                 # run code using the parent frame globals and locals
-                exec(compiled, f.f_globals, f.f_locals)
+                exec(compiled, globals_env, f.f_globals)
             # pyre-fixme[16]: `TextIO` has no attribute `getvalue`.
             out = sys.stdout.getvalue()
+        except AssertionError as e:
+            msg = str(e)
+            if msg:
+                out = f"AssertionError: {msg}\n"
+            else:
+                out = "AssertionError!\n"
         except Exception as e:
             out = str(e)
         finally:
             sys.stdout = origout
             f = None
         out = self._applysubstitutions(out)
+        self._lastout = out
         if out:
             return out
 

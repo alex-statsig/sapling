@@ -1,4 +1,3 @@
-  $ setconfig workingcopy.ruststatus=False
   $ . "$TESTDIR/library.sh"
   $ setconfig experimental.allowfilepeer=True
   $ setconfig devel.print-metrics=1 devel.skip-metrics=watchman
@@ -39,8 +38,8 @@ Clone it
                         gettreepack : { basemfnodes : 0,
                                         calls : 1,
                                         mfnodes : 1},
-                        read : { bytes : 2520},
-                        write : { bytes : 909}}}}
+                        read : { bytes : *}, (glob)
+                        write : { bytes : *}}}} (glob)
   $ cd client1
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
@@ -87,8 +86,8 @@ Pull exactly up to d into the client
   adding file changes
   { metrics : { scmstore : { file : { api : { hg : { prefetch : { calls : 3}}}}},
                 ssh : { connections : 1,
-                        read : { bytes : 1086},
-                        write : { bytes : 666}}}}
+                        read : { bytes : *}, (glob)
+                        write : { bytes : *}}}} (glob)
 
 Test error message about MissingNodesError
   $ drawdag --config paths.default=ssh://user@dummy/master-lagged --config remotefilelog.debug=0 --config devel.print-metrics=0 << 'EOS'

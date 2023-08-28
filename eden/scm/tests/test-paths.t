@@ -1,4 +1,3 @@
-#chg-compatible
 #debugruntest-compatible
   $ setconfig experimental.allowfilepeer=True
 
@@ -34,7 +33,7 @@ With paths:
 #if msys
   $ SOMETHING=//foo hg paths
   dupe = $TESTTMP/b#tip
-  expand = /foo/bar
+  expand = \\foo\bar
 #else
   $ SOMETHING=/foo hg paths
   dupe = $TESTTMP/b#tip

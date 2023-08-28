@@ -15,6 +15,7 @@
 #include <random>
 
 #include "eden/fs/config/EdenConfig.h"
+#include "eden/fs/config/InodeCatalogType.h"
 #include "eden/fs/inodes/DirEntry.h"
 #include "eden/fs/inodes/InodeCatalog.h"
 #include "eden/fs/inodes/Overlay.h"
@@ -29,6 +30,10 @@ DEFINE_bool(
     copy,
     false,
     "Set this parameter to test copying instead of serializing");
+DEFINE_string(
+    overlayType,
+    kDefaultInodeCatalogType == InodeCatalogType::Sqlite ? "Sqlite" : "Legacy",
+    "Type of overlay to be used. Defaults: Windows - Sqlite; Linux|macOS - Legacy");
 
 namespace {
 
@@ -129,7 +134,9 @@ void serializeOverlayDirectory(
               .count()));
 }
 
-void benchmarkOverlayDirSerialization(AbsolutePathPiece overlayPath) {
+void benchmarkOverlayDirSerialization(
+    AbsolutePathPiece overlayPath,
+    InodeCatalogType overlayType) {
   // A large mount will contain 500,000 trees. If they're all loaded, they
   // will all be written into the overlay. This benchmark simulates that
   // workload and measures how long it takes.
@@ -140,9 +147,11 @@ void benchmarkOverlayDirSerialization(AbsolutePathPiece overlayPath) {
   auto overlay = Overlay::create(
       overlayPath,
       kPathMapDefaultCaseSensitive,
-      kDefaultInodeCatalogType,
+      overlayType,
+      kDefaultInodeCatalogOptions,
       std::make_shared<NullStructuredLogger>(),
       makeRefPtr<EdenStats>(),
+      true,
       *EdenConfig::createTestEdenConfig());
   printf("Initalizing Overlay...\n");
 
@@ -203,7 +212,8 @@ int main(int argc, char* argv[]) {
   }
 
   auto overlayPath = normalizeBestEffort(FLAGS_overlayPath.c_str());
-  benchmarkOverlayDirSerialization(overlayPath);
+  auto overlayType = inodeCatalogTypeFromString(FLAGS_overlayType);
+  benchmarkOverlayDirSerialization(overlayPath, overlayType.value());
 
   return 0;
 }

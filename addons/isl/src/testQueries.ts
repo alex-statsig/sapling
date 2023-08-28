@@ -74,6 +74,16 @@ export const CommitInfoTestUtils = {
     });
   },
 
+  clickAmendMessageButton() {
+    const amendMessageButton: HTMLButtonElement | null = within(
+      screen.getByTestId('commit-info-actions-bar'),
+    ).queryByText('Amend Message');
+    expect(amendMessageButton).toBeInTheDocument();
+    act(() => {
+      fireEvent.click(unwrap(amendMessageButton));
+    });
+  },
+
   clickCommitButton() {
     const commitButton: HTMLButtonElement | null = within(
       screen.getByTestId('commit-info-actions-bar'),
@@ -147,6 +157,15 @@ export const CommitInfoTestUtils = {
     });
   },
 
+  /** Internal tests only, since GitHub's message schema does not include this field */
+  clickToEditReviewers() {
+    act(() => {
+      const title = screen.getByTestId('commit-info-rendered-reviewers');
+      expect(title).toBeInTheDocument();
+      fireEvent.click(title);
+    });
+  },
+
   expectIsEditingTitle() {
     const titleEditor = screen.queryByTestId('commit-info-title-field') as HTMLInputElement;
     expect(titleEditor).toBeInTheDocument();
@@ -199,4 +218,13 @@ function isInternalMessageFields(): boolean {
   const snapshot = snapshot_UNSTABLE();
   const schema = snapshot.getLoadable(commitMessageFieldsSchema).valueOrThrow();
   return schema !== OSSDefaultFieldSchema;
+}
+
+/**
+ * When querying changed files, there may be unicode left-to-right marks in the path,
+ * which make the test hard to read. This util searches for a string, inserting optional
+ * RTL marks at path boundaries.
+ */
+export function ignoreRTL(s: string): RegExp {
+  return new RegExp(`^\u200E?${s}$`);
 }

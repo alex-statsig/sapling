@@ -285,7 +285,7 @@ def unbundle(orig, repo, cg, heads, source, url, replaydata=None, respondlightly
     # Preload the manifests that the client says we'll need. This happens
     # outside the lock, thus cutting down on our lock time and increasing commit
     # throughput.
-    if util.safehasattr(cg, "params"):
+    if hasattr(cg, "params"):
         preloadmfs = cg.params.get("preloadmanifests")
         if preloadmfs:
             for mfnode in preloadmfs.split(","):
@@ -344,7 +344,7 @@ def validaterevset(repo, revset, onto):
 
 def getrebaseparts(repo, peer, outgoing, onto):
     parts = []
-    if util.safehasattr(repo.manifestlog, "datastore"):
+    if hasattr(repo.manifestlog, "datastore"):
         try:
             treemod = extensions.find("treemanifest")
         except KeyError:
@@ -500,7 +500,7 @@ def _push(orig, ui, repo, *args, **opts):
     return result
 
 
-class replacementtracker(object):
+class replacementtracker:
     """track replacements of commits during pushrebase"""
 
     def __init__(self):
@@ -740,8 +740,6 @@ def _exchangesetup():
                 bundle = _createbundlerepo(op, bundlepath)
 
                 ontoctx = resolveonto(op.repo, ontoparam)
-
-                prepushrebasehooks(op, params, bundle, bundlefile)
 
                 ui.setconfig("pushrebase", pushrebasemarker, True)
                 verbose = ontoctx is not None and ui.configbool("pushrebase", "verbose")
@@ -1303,49 +1301,6 @@ def _addbundlepacks(ui, mfl, packpaths):
     mfl.datastore = contentstore.unioncontentstore(*bundledatastores)
     bundlehiststores.append(mfl.historystore)
     mfl.historystore = metadatastore.unionmetadatastore(*bundlehiststores)
-
-
-def prepushrebasehooks(op, params, bundle, bundlefile):
-    onto = params.get("onto")
-    prelockonto = resolveonto(op.repo, onto or donotrebasemarker)
-    prelockontonode = prelockonto.hex() if prelockonto else None
-
-    # Allow running hooks on the new commits before we take the lock
-    if op.hookargs is None:
-        # Usually pushrebase prepushrebasehooks are called outside of
-        # transaction. If that's the case then op.hookargs is not None and
-        # it contains hook arguments.
-        # However Mononoke -> hg sync job might replay two bundles under
-        # the same transaction. In that case hookargs are stored in transaction
-        # object (see bundle2operation:gettransaction).
-        #
-        # For reference: Mononoke -> hg sync job uses wireproto.py:unbundlereplay
-        # function as it's entry point
-        tr = op.repo.currenttransaction()
-        if tr is not None:
-            prelockrebaseargs = tr.hookargs.copy()
-        else:
-            raise error.ProgrammingError("internal error: hookargs are not set")
-    else:
-        prelockrebaseargs = op.hookargs.copy()
-    prelockrebaseargs["source"] = "push"
-    prelockrebaseargs["bundle2"] = "1"
-    prelockrebaseargs["node"] = scmutil.revsingle(bundle, "min(bundle())").hex()
-    prelockrebaseargs["node_onto"] = prelockontonode
-    if onto:
-        prelockrebaseargs["onto"] = onto
-    prelockrebaseargs["hook_bundlepath"] = bundlefile
-
-    for path in op.records[treepackrecords]:
-        if ":" in path:
-            raise RuntimeError(_("tree pack path may not contain colon (%s)") % path)
-    packpaths = ":".join(op.records[treepackrecords])
-    prelockrebaseargs["hook_packpaths"] = packpaths
-
-    op.repo.hook("prepushrebase", throw=True, **prelockrebaseargs)
-
-    revs = list(bundle.revs("bundle()"))
-    changegroup.checkrevs(bundle, revs)
 
 
 def syncifneeded(repo):

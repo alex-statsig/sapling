@@ -1,6 +1,5 @@
 #debugruntest-compatible
 
-  $ setconfig workingcopy.ruststatus=false
 
 #require no-fsmonitor
 
@@ -116,7 +115,6 @@ Show debug commands if there are no other candidates
   debugdata
   debugdatapack
   debugdate
-  debugdeltachain
   debugdetectissues
   debugdiffdirs
   debugdifftree
@@ -184,7 +182,6 @@ Show debug commands if there are no other candidates
   debugremotefilelog
   debugrename
   debugresetheads
-  debugrevlog
   debugrevlogclone
   debugrevset
   debugrevspec
@@ -446,7 +443,6 @@ Show all commands + options
   debugdata: changelog, manifest, dir
   debugdatapack: long, node, node-delta
   debugdate: extended, range
-  debugdeltachain: changelog, manifest, dir, template
   debugdetectissues: 
   debugdiffdirs: rev, include, exclude, style, template
   debugdifftree: rev, include, exclude, style, template
@@ -455,7 +451,7 @@ Show all commands + options
   debugdiscovery: rev
   debugdrawdag: print, bookmarks, files, write-env
   debugdryup: 
-  debugdumpdynamicconfig: reponame, username, canary
+  debugdumpdynamicconfig: reponame, username, canary, mode
   debugdumpindexedlog: 
   debugdumptrace: time-range, session-id, output-path
   debugduplicatedconfig: style, template
@@ -514,7 +510,6 @@ Show all commands + options
   debugremotefilelog: decompress
   debugrename: rev
   debugresetheads: 
-  debugrevlog: changelog, manifest, dir, dump
   debugrevlogclone: 
   debugrevset: 
   debugrevspec: optimize, show-revs, show-set, show-stage, no-optimized, verify-optimized

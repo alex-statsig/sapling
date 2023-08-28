@@ -511,7 +511,7 @@ def dorecord(ui, repo, commitfunc, cmdsuggest, backupall, filterfn, *pats, **opt
     return commit(ui, repo, recordinwlock, pats, opts)
 
 
-class dirnode(object):
+class dirnode:
     """
     Represent a directory in user working copy with information required for
     the purpose of tersing its status.
@@ -877,7 +877,7 @@ def findsubcmd(args, table, partial=False):
     cmd, args, level = args[0], args[1:], 1
     aliases, entry = findcmd(cmd, table)
     cmd = aliases[0]
-    while args and entry[0] and util.safehasattr(entry[0], "subcommands"):
+    while args and entry[0] and hasattr(entry[0], "subcommands"):
         try:
             subaliases, subentry = findcmd(args[0], entry[0].subcommands)
         except error.UnknownCommand as e:
@@ -888,7 +888,7 @@ def findsubcmd(args, table, partial=False):
         else:
             aliases, entry = subaliases, subentry
             cmd, args, level = "%s %s" % (cmd, aliases[0]), args[1:], level + 1
-    if not partial and util.safehasattr(entry[0], "subonly") and entry[0].subonly:
+    if not partial and hasattr(entry[0], "subonly") and entry[0].subonly:
         raise error.UnknownSubcommand(cmd, None, None)
     return cmd, args, aliases, entry, level
 
@@ -1097,7 +1097,7 @@ def rendertemplate(ui, tmpl, props=None):
     return t.render(mapping)
 
 
-class _unclosablefile(object):
+class _unclosablefile:
     def __init__(self, fp):
         self._fp = fp
 
@@ -1205,6 +1205,7 @@ def copy(ui, repo, pats, opts, rename=False):
     after = opts.get("after")
     dryrun = opts.get("dry_run")
     wctx = repo[None]
+    auditor = pathutil.pathauditor(repo.root)
 
     def walkpat(pat):
         srcs = []
@@ -1236,6 +1237,7 @@ def copy(ui, repo, pats, opts, rename=False):
     # otarget: ossep
     def copyfile(abssrc, relsrc, otarget, exact):
         abstarget = pathutil.canonpath(repo.root, cwd, otarget)
+        auditor(abstarget)
         if "/" in abstarget:
             # We cannot normalize abstarget itself, this would prevent
             # case only renames, like a => A.
@@ -1902,7 +1904,7 @@ def _changesetlabels(ctx):
     return " ".join(labels)
 
 
-class changeset_printer(object):
+class changeset_printer:
     """show changeset information when templating not requested."""
 
     def __init__(self, ui, repo, matchfn, diffopts, buffered):
@@ -2520,7 +2522,7 @@ def walkfilerevs(repo, match, follow, revs, fncache):
     return wanted
 
 
-class _followfilter(object):
+class _followfilter:
     def __init__(self, repo, onlyfirst=False):
         self.repo = repo
         self.startrev = nullrev
@@ -2622,7 +2624,7 @@ def walkchangerevs(repo, match, opts, prepare):
 
         # The slow path checks files modified in every changeset.
         # This is really slow on large repos, so compute the set lazily.
-        class lazywantedset(object):
+        class lazywantedset:
             def __init__(self):
                 self.set = set()
                 self.revs = set(revs)
@@ -3415,8 +3417,38 @@ def add(ui, repo, match, prefix, explicitonly, **opts):
         if file in pctx or (ignored(file) and repo.wvfs.isfileorlink(file))
     )
 
+    if util.fscasesensitive(repo.root):
+
+        def normpath(f):
+            return f
+
+    else:
+
+        def normpath(f):
+            return f.lower()
+
+    # Mapping of normalized exact path to actual exact path.
+    # On case sensitive filesystems this serves no purpose.
+    norm_to_exact = {normpath(f): f for f in files if match.exact(f)}
+
     for f in sorted(files):
-        exact = match.exact(f)
+        fn = normpath(f)
+        if fn in norm_to_exact and f != norm_to_exact[fn]:
+            # Skip if we are a case collision with an exactly matched file. The
+            # Rust matcher is case insensitive on case insensitive file
+            # systems, but there is one situation where you can still have
+            # files that differ only in case:
+            #
+            #   $ sl status
+            #   ? FOO
+            #   R foo
+            #
+            # If you run "sl add FOO" we only want to add FOO even though the
+            # "FOO" pattern matches both foo and FOO (assuming you are on a
+            # case insensitive filesystem).
+            continue
+
+        exact = fn in norm_to_exact
         if exact or not explicitonly and f not in wctx and repo.wvfs.lexists(f):
             if cca:
                 cca(f)
@@ -3624,8 +3656,6 @@ def cat(ui, repo, ctx, matcher, basefm, fntemplate, prefix, **opts):
                 pass
         with formatter.maybereopen(basefm, filename, opts) as fm:
             data = ctx[path].data()
-            if opts.get("decode"):
-                data = repo.wwritedata(path, data)
             fm.startitem()
             fm.writebytes("data", b"%s", data)
             fm.data(abspath=path, path=matcher.rel(path))

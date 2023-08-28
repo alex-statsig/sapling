@@ -6,6 +6,8 @@
  */
 
 import type {CommitInfo, SuccessorInfo} from './types';
+import type {Snapshot} from 'recoil';
+import type {ContextMenuItem} from 'shared/ContextMenu';
 
 import {BranchIndicator} from './BranchIndicator';
 import {hasUnsavedEditedCommitMessage} from './CommitInfoView/CommitInfoState';
@@ -15,10 +17,12 @@ import {InlineBadge} from './InlineBadge';
 import {Tooltip} from './Tooltip';
 import {UncommitButton} from './UncommitButton';
 import {UncommittedChanges} from './UncommittedChanges';
+import {latestCommitMessage} from './codeReview/CodeReviewInfo';
 import {DiffInfo} from './codeReview/DiffBadge';
 import {islDrawerState} from './drawerState';
 import {isDescendant} from './getCommitTree';
 import {t, T} from './i18n';
+import {getAmendToOperation, isAmendToAllowedForCommit} from './operationUtils';
 import {GotoOperation} from './operations/GotoOperation';
 import {HideOperation} from './operations/HideOperation';
 import {RebaseOperation} from './operations/RebaseOperation';
@@ -28,6 +32,7 @@ import {RelativeDate} from './relativeDate';
 import {isNarrowCommitTree} from './responsive';
 import {useCommitSelection} from './selection';
 import {
+  inlineProgressByHash,
   isFetchingUncommittedChanges,
   latestCommitTreeMap,
   latestUncommittedChanges,
@@ -37,7 +42,7 @@ import {
 } from './serverAPIState';
 import {short} from './utils';
 import {VSCodeButton, VSCodeTag} from '@vscode/webview-ui-toolkit/react';
-import React, {memo} from 'react';
+import React, {memo, useEffect, useState} from 'react';
 import {useRecoilCallback, useRecoilValue, useSetRecoilState} from 'recoil';
 import {ComparisonType} from 'shared/Comparison';
 import {useContextMenu} from 'shared/ContextMenu';
@@ -102,10 +107,14 @@ export const Commit = memo(
     const runOperation = useRunOperation();
     const isHighlighted = useRecoilValue(highlightedCommits).has(commit.hash);
 
+    const inlineProgress = useRecoilValue(inlineProgressByHash(commit.hash));
+
     const {isSelected, onClickToSelect} = useCommitSelection(commit.hash);
     const actionsPrevented = previewPreventsActions(previewType);
 
     const isNarrow = useRecoilValue(isNarrowCommitTree);
+
+    const [title] = useRecoilValue(latestCommitMessage(commit.hash));
 
     const isNonActionable = previewType === CommitPreview.NON_ACTIONABLE_COMMIT;
 
@@ -132,8 +141,8 @@ export const Commit = memo(
       });
     });
 
-    const contextMenu = useContextMenu(() => {
-      const items = [
+    const makeContextMenuOptions = useRecoilCallback(({snapshot}) => () => {
+      const items: Array<ContextMenuItem> = [
         {
           label: <T replace={{$hash: short(commit?.hash)}}>Copy Commit Hash "$hash"</T>,
           onClick: () => platform.clipboardCopy(commit.hash),
@@ -146,13 +155,22 @@ export const Commit = memo(
         });
       }
       if (!isPublic && !actionsPrevented) {
+        items.push({type: 'divider'});
+        if (isAmendToAllowedForCommit(commit, snapshot)) {
+          items.push({
+            label: <T>Amend changes to here</T>,
+            onClick: () => runOperation(getAmendToOperation(commit, snapshot)),
+          });
+        }
         items.push({
-          label: <T>Hide Commit and Descendents</T>,
+          label: <T>Hide Commit and Descendants</T>,
           onClick: () => setOperationBeingPreviewed(new HideOperation(commit.hash)),
         });
       }
       return items;
     });
+
+    const contextMenu = useContextMenu(makeContextMenuOptions);
 
     const commitActions = [];
 
@@ -225,7 +243,10 @@ export const Commit = memo(
         (commit.isHead || previewType === CommitPreview.GOTO_PREVIOUS_LOCATION) ? (
           <HeadCommitInfo commit={commit} previewType={previewType} hasChildren={hasChildren} />
         ) : null}
-        <div className={'commit-rows' + (isNarrow ? ' narrow' : '')}>
+        <div
+          className={
+            'commit-rows' + (isNarrow ? ' narrow' : '') + (isSelected ? ' selected-commit' : '')
+          }>
           {isSelected ? (
             <div className="selected-commit-background" data-testid="selected-commit" />
           ) : null}
@@ -241,7 +262,7 @@ export const Commit = memo(
             <div className="commit-avatar" />
             {isPublic ? null : (
               <span className="commit-title">
-                <span>{commit.title}</span>
+                <span>{title}</span>
                 <CommitDate date={commit.date} />
               </span>
             )}
@@ -253,20 +274,17 @@ export const Commit = memo(
               <VSCodeTag key={remoteBookmarks}>{remoteBookmarks}</VSCodeTag>
             ))}
             {commit?.stableCommitMetadata != null ? (
-              <Tooltip title={commit.stableCommitMetadata}>
-                <div className="stable-commit-metadata">
-                  <VSCodeTag key={commit.stableCommitMetadata}>
-                    {commit.stableCommitMetadata}
-                  </VSCodeTag>
-                </div>
-              </Tooltip>
+              <>
+                {commit.stableCommitMetadata.map(stable => (
+                  <Tooltip title={stable.description} key={stable.value}>
+                    <div className="stable-commit-metadata">
+                      <VSCodeTag>{stable.value}</VSCodeTag>
+                    </div>
+                  </Tooltip>
+                ))}
+              </>
             ) : null}
             {isPublic ? <CommitDate date={commit.date} /> : null}
-            {previewType === CommitPreview.REBASE_OPTIMISTIC_ROOT ? (
-              <span className="commit-inline-operation-progress">
-                <Icon icon="loading" /> <T>rebasing...</T>
-              </span>
-            ) : null}
             {isNarrow ? commitActions : null}
           </DraggableCommit>
           <DivIfChildren className="commit-second-row">
@@ -274,6 +292,11 @@ export const Commit = memo(
             {commit.successorInfo != null ? (
               <SuccessorInfoToDisplay successorInfo={commit.successorInfo} />
             ) : null}
+            {inlineProgress && (
+              <span className="commit-inline-operation-progress">
+                <Icon icon="loading" /> <T>{inlineProgress}</T>
+              </span>
+            )}
           </DivIfChildren>
           {!isNarrow ? commitActions : null}
         </div>
@@ -417,6 +440,7 @@ function DraggableCommit({
   onDoubleClick?: (e: React.MouseEvent<HTMLDivElement>) => unknown;
   onContextMenu?: React.MouseEventHandler<HTMLDivElement>;
 }) {
+  const [dragDisabledMessage, setDragDisabledMessage] = useState<string | null>(null);
   const handleDragEnter = useRecoilCallback(
     ({snapshot, set}) =>
       () => {
@@ -454,10 +478,8 @@ function DraggableCommit({
     ({snapshot}) =>
       (event: React.DragEvent<HTMLDivElement>) => {
         // can't rebase with uncommitted changes
-        const loadable = snapshot.getLoadable(latestUncommittedChanges);
-        const hasUncommittedChanges = loadable.state === 'hasValue' && loadable.contents.length > 0;
-
-        if (hasUncommittedChanges) {
+        if (hasUncommittedChanges(snapshot)) {
+          setDragDisabledMessage(t('Cannot drag to rebase with uncommitted changes.'));
           event.preventDefault();
         }
 
@@ -472,6 +494,13 @@ function DraggableCommit({
       },
     [commit],
   );
+
+  useEffect(() => {
+    if (dragDisabledMessage) {
+      const timeout = setTimeout(() => setDragDisabledMessage(null), 1500);
+      return () => clearTimeout(timeout);
+    }
+  }, [dragDisabledMessage]);
 
   return (
     <div
@@ -489,8 +518,25 @@ function DraggableCommit({
       onContextMenu={onContextMenu}
       tabIndex={0}
       data-testid={'draggable-commit'}>
-      {children}
+      <div className="commit-wide-drag-target" onDragEnter={handleDragEnter} />
+      {dragDisabledMessage != null ? (
+        <Tooltip trigger="manual" shouldShow title={dragDisabledMessage}>
+          {children}
+        </Tooltip>
+      ) : (
+        children
+      )}
     </div>
+  );
+}
+
+function hasUncommittedChanges(snapshot: Snapshot): boolean {
+  const loadable = snapshot.getLoadable(latestUncommittedChanges);
+  return (
+    loadable.state === 'hasValue' &&
+    loadable.contents.filter(
+      commit => commit.status !== '?', // untracked files are ok
+    ).length > 0
   );
 }
 
@@ -510,6 +556,6 @@ export function SuccessorInfoToDisplay({successorInfo}: {successorInfo: Successo
     case 'histedit':
       return <T>Histedited as a newer commit</T>;
     default:
-      return <T>Rewritten as a newer commi'</T>;
+      return <T>Rewritten as a newer commit</T>;
   }
 }

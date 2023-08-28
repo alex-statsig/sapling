@@ -19,6 +19,7 @@ import random
 import time
 import weakref
 from contextlib import contextmanager
+from functools import partial
 from typing import Optional, Set
 
 import bindings
@@ -133,6 +134,30 @@ class storecache(_basefilecache):
 
     def join(self, obj, fname):
         return obj.sjoin(fname)
+
+
+class metalogcache(scmutil.keyedcache):
+    """property cache based on given metalog keys"""
+
+    def __init__(self, *metalog_keys):
+        if metalog_keys:
+            key = lambda repo: tuple(repo.metalog().get_hash(k) for k in metalog_keys)
+        else:
+            key = lambda repo: repo.metalog().root()
+        super().__init__(key)
+
+
+class dagcache(scmutil.keyedcache):
+    """property cache based on dag version
+
+    Side effect: creates changelog.
+
+    Note: dag only tracks commits, not bookmarks, or remote names, or
+    visibility.
+    """
+
+    def __init__(self):
+        super().__init__(lambda repo: repo.changelog.dag.version())
 
 
 def isfilecached(repo, name):
@@ -250,7 +275,7 @@ class localpeer(repository.peer):
             try:
                 cg = exchange.readbundle(self.ui, cg, None)
                 ret = exchange.unbundle(self._repo, cg, heads, "push", url)
-                if util.safehasattr(ret, "getchunks"):
+                if hasattr(ret, "getchunks"):
                     # This is a bundle20 object, turn it into an unbundler.
                     # This little dance should be dropped eventually when the
                     # API is finally improved.
@@ -317,7 +342,7 @@ class locallegacypeer(repository.legacypeer, localpeer):
     # End of baselegacywirecommands interface.
 
 
-class localrepository(object):
+class localrepository:
     """local repository object
 
     ``unsafe.wvfsauditorcache`` config option allows the user to enable
@@ -325,7 +350,13 @@ class localrepository(object):
     reduces the amount of stat-like system calls and thus saves time.
     This option should be safe if symlinks are not used in the repo"""
 
-    supportedformats = {"revlogv1", "generaldelta", "treemanifest"}
+    supportedformats = {
+        "revlogv1",
+        "generaldelta",
+        "treemanifest",
+        # no longer used, but needed to preserve compatibility
+        "lz4revlog",
+    }
     _basesupported = supportedformats | {
         edenfs.requirement,
         "store",
@@ -414,9 +445,9 @@ class localrepository(object):
         """Instantiate local repo object, optionally creating a new repo on disk if `create` is True.
         If specified, `initial_config` is added to the created repo's config."""
 
-        # Simplify things by keepning identity cache scoped at max to
+        # Simplify things by keeping identity cache scoped at max to
         # a single repo's lifetime. In particular this is necessary
-        # wrt git submodules.
+        # with respect to git submodules.
         identity.sniffdir.cache_clear()
 
         if create:
@@ -447,12 +478,6 @@ class localrepository(object):
         self.svfs = None
         self.path = self._rsrepo.dotpath()
         self.origroot = path
-        # This is only used by context.workingctx.match in order to
-        # detect files in forbidden paths.
-        self.auditor = pathutil.pathauditor(self.root)
-        # This is only used by context.basectx.match in order to detect
-        # files in forbidden paths..
-        self.nofsauditor = pathutil.pathauditor(self.root, realfs=False, cached=True)
         # localvfs: rooted at .hg, used to access repo files outside of
         # the store that are local to this working copy.
         self.localvfs = vfsmod.vfs(self.path, cacheaudited=True)
@@ -548,7 +573,7 @@ class localrepository(object):
         if self.ui.configbool("devel", "all-warnings") or self.ui.configbool(
             "devel", "check-locks"
         ):
-            if util.safehasattr(self.svfs, "vfs"):  # this is filtervfs
+            if hasattr(self.svfs, "vfs"):  # this is filtervfs
                 self.svfs.vfs.audit = self._getsvfsward(self.svfs.vfs.audit)
             else:  # standard vfs
                 self.svfs.audit = self._getsvfsward(self.svfs.audit)
@@ -571,8 +596,6 @@ class localrepository(object):
         self._dirstatevalidatewarned = False
 
         self._branchcaches = {}
-        self.filterpats = {}
-        self._datafilters = {}
         self._transref = self._lockref = self._wlockref = None
 
         # headcache might belong to the changelog object for easier
@@ -607,6 +630,15 @@ class localrepository(object):
         self._applyopenerreqs()
 
         self._eventreporting = True
+
+        # needed by revlog2
+        sfmt = self.storage_format()
+        if sfmt == "revlog" or not extensions.isenabled(self.ui, "treemanifest"):
+            from . import revlog2
+
+            revlog2.patch_types()
+
+            self.svfs._reporef = weakref.ref(self)
 
         try:
             self._treestatemigration()
@@ -745,8 +777,8 @@ class localrepository(object):
             repo = rref()
             if (
                 repo is None
-                or not util.safehasattr(repo, "_wlockref")
-                or not util.safehasattr(repo, "_lockref")
+                or not hasattr(repo, "_wlockref")
+                or not hasattr(repo, "_lockref")
             ):
                 return
             if mode in (None, "r", "rb"):
@@ -788,7 +820,7 @@ class localrepository(object):
         def checksvfs(path, mode=None):
             ret = origfunc(path, mode=mode)
             repo = rref()
-            if repo is None or not util.safehasattr(repo, "_lockref"):
+            if repo is None or not hasattr(repo, "_lockref"):
                 return
             if mode in (None, "r", "rb"):
                 return
@@ -816,7 +848,7 @@ class localrepository(object):
         return supported
 
     def close(self):
-        if util.safehasattr(self, "connectionpool"):
+        if hasattr(self, "connectionpool"):
             self.connectionpool.close()
 
         self.commitpending()
@@ -1109,9 +1141,9 @@ class localrepository(object):
             # Resolve headnames to heads.
             if headnames:
                 if (
-                    self.ui.configbool("pull", "httphashprefix")
-                    and self.nullableedenapi is not None
-                ):
+                    eagerepo.iseagerepo(self)
+                    or self.ui.configbool("pull", "httphashprefix")
+                ) and self.nullableedenapi is not None:
                     for name in headnames:
                         # check if headname can be a hex hash prefix
                         if any(n not in "abcdefg1234567890" for n in name.lower()):
@@ -1175,8 +1207,6 @@ class localrepository(object):
 
             # Filter out heads that exist in the repo.
             if pullheads:
-                if fastpathheads:
-                    self.invalidatechangelog()
                 pullheads -= set(self.changelog.filternodes(list(pullheads)))
 
             self.ui.log(
@@ -1211,10 +1241,12 @@ class localrepository(object):
                 remotename = bookmarks.remotenameforurl(
                     self.ui, remote.url()
                 )  # ex. 'default' or 'remote'
+                # saveremotenames will invalidate self.heads by bumping
+                # _remotenames.changecount, and invalidate phase sets
+                # like `public()` by calling invalidatevolatilesets.
                 bookmarks.saveremotenames(
                     self, {remotename: remotenamechanges}, override=False
                 )
-                self.invalidate(True)
 
             # Update visibleheads:
             if heads:
@@ -1245,11 +1277,12 @@ class localrepository(object):
                 raise
             return set()
 
-    @repofilecache(sharedpaths=["store/bookmarks"], localpaths=["bookmarks.current"])
+    # not checking bookmarks.current - is it necessary?
+    @metalogcache("bookmarks")
     def _bookmarks(self):
         return bookmarks.bmstore(self)
 
-    @repofilecache(sharedpaths=["store/remotenames"])
+    @metalogcache("remotenames")
     def _remotenames(self):
         return bookmarks.remotenames(self)
 
@@ -1289,7 +1322,7 @@ class localrepository(object):
     def nullableedenapi(self):
         return self._getedenapi(nullable=True)
 
-    @util.propertycache
+    @dagcache()
     def _dagcopytrace(self):
         return bindings.copytrace.dagcopytrace(
             self.changelog.inner,
@@ -1650,52 +1683,11 @@ class localrepository(object):
     def pathto(self, f, cwd=None):
         return self.dirstate.pathto(f, cwd)
 
-    def _loadfilter(self, filter):
-        if filter not in self.filterpats:
-            l = []
-            for pat, cmd in self.ui.configitems(filter):
-                if cmd == "!":
-                    continue
-                mf = matchmod.match(self.root, "", [pat])
-                fn = None
-                params = cmd
-                for name, filterfn in pycompat.iteritems(self._datafilters):
-                    if cmd.startswith(name):
-                        fn = filterfn
-                        params = cmd[len(name) :].lstrip()
-                        break
-                if not fn:
-                    fn = lambda s, c, **kwargs: util.filter(s, c)
-                l.append((mf, fn, params))
-            self.filterpats[filter] = l
-        return self.filterpats[filter]
-
-    def _filter(self, filterpats, filename, data):
-        for mf, fn, cmd in filterpats:
-            if mf(filename):
-                self.ui.debug("filtering %s through %s\n" % (filename, cmd))
-                data = fn(data, cmd, ui=self.ui, repo=self, filename=filename)
-                break
-
-        return data
-
-    @util.propertycache
-    def _encodefilterpats(self):
-        return self._loadfilter("encode")
-
-    @util.propertycache
-    def _decodefilterpats(self):
-        return self._loadfilter("decode")
-
-    def adddatafilter(self, name, filter):
-        self._datafilters[name] = filter
-
     def wread(self, filename):
         if self.wvfs.islink(filename):
-            data = pycompat.encodeutf8(self.wvfs.readlink(filename))
+            return pycompat.encodeutf8(self.wvfs.readlink(filename))
         else:
-            data = self.wvfs.read(filename)
-        return self._filter(self._encodefilterpats, filename, data)
+            return self.wvfs.read(filename)
 
     def wwrite(
         self, filename: str, data: bytes, flags: str, backgroundclose: bool = False
@@ -1704,7 +1696,6 @@ class localrepository(object):
 
         This returns length of written (maybe decoded) data.
         """
-        data = self._filter(self._decodefilterpats, filename, data)
         if "l" in flags:
             self.wvfs.symlink(data, filename)
         else:
@@ -1712,9 +1703,6 @@ class localrepository(object):
             if "x" in flags:
                 self.wvfs.setflags(filename, False, True)
         return len(data)
-
-    def wwritedata(self, filename, data):
-        return self._filter(self._decodefilterpats, filename, data)
 
     def currenttransaction(self):
         """return the current transaction or None if non exists"""
@@ -1840,6 +1828,16 @@ class localrepository(object):
                     mainnodes.append(node)
             cl.inner.flush(mainnodes)
 
+            # flush(mainnodes) might reassign ids that makes the cached `public()`
+            # incompatible (force slow paths). Invalidate cached `public()` to
+            # avoid slow paths.
+            # Note: invalidation is not done in the phase cache. See D47478975
+            # and S353203.
+            new_version = cl.dag.version()
+            old_version = repo.dageval(lambda: public()).hints().get("dag_version")
+            if old_version is None or old_version.cmp(new_version) is None:
+                repo.invalidatevolatilesets()
+
         def writependingchangelog(tr):
             repo = reporef()
             _flushchangelog(repo)
@@ -1858,11 +1856,6 @@ class localrepository(object):
                 # transaction running
                 repo.dirstate.write(None)
                 repo._txnreleased = True
-
-                # Don't invalidate Rust if Rust and Python are sharing the changelog object.
-                # Python's invalidation will cover it.
-                if not repo.ui.configbool("experimental", "use-rust-changelog"):
-                    self._rsrepo.invalidatechangelog()
             else:
                 # discard all changes (including ones already written
                 # out) in this transaction
@@ -2228,12 +2221,6 @@ class localrepository(object):
     def invalidatechangelog(self):
         """Invalidates the changelog. Discard pending changes."""
 
-        # Don't reload Rust here if Rust and Python are sharing the
-        # same changelog object. The Rust changelog will be reloaded
-        # as the Python changelog is reloaded on next access.
-        if not self.ui.configbool("experimental", "use-rust-changelog"):
-            self._rsrepo.invalidatechangelog()
-
         if "changelog" in self._filecache:
             del self._filecache["changelog"]
         if "changelog" in self.__dict__:
@@ -2242,6 +2229,9 @@ class localrepository(object):
         # different form).
         self._headcache.clear()
         self._phasecache.invalidate()
+        self.invalidatedagcopytrace()
+
+    def invalidatedagcopytrace(self):
         self.__dict__.pop("_dagcopytrace", None)
 
     def invalidatemetalog(self):
@@ -2279,20 +2269,13 @@ class localrepository(object):
             timeout = self.ui.configint("ui", "timeout")
             warntimeout = self.ui.configint("ui", "timeout.warn")
 
-        rsrepo = self._rsrepo
-
-        def trywlock():
-            return rsrepo.trywlock(vfs.base)
-
-        def trylock():
-            return rsrepo.trylock()
-
+        # Defer to Rust to acquire repo and wc locks. This allows lock sharing
+        # between Python and Rust.
         trylockfn = None
-        if self.ui.configbool("experimental", "share-locks", True):
-            if lockname == "lock":
-                trylockfn = trylock
-            elif lockname == "wlock":
-                trylockfn = trywlock
+        if lockname == "lock":
+            trylockfn = self._rsrepo.trylock
+        elif lockname == "wlock":
+            trylockfn = partial(self._rsrepo.trywlock, vfs.base)
 
         return lockmod.trylock(
             self.ui,
@@ -2543,10 +2526,10 @@ class localrepository(object):
             metamatched
             and node is not None
             # some filectxs do not support rawdata or flags
-            and util.safehasattr(fctx, "rawdata")
-            and util.safehasattr(fctx, "rawflags")
+            and hasattr(fctx, "rawdata")
+            and hasattr(fctx, "rawflags")
             # some (external) filelogs do not have addrawrevision
-            and util.safehasattr(flog, "addrawrevision")
+            and hasattr(flog, "addrawrevision")
             # parents must match to be able to reuse rawdata
             and fctx.filelog().parents(node) == (fparent1, fparent2)
         ):
@@ -2814,7 +2797,7 @@ class localrepository(object):
                 if not isgit:
                     # Prefetch rename data, since _filecommit will look for it.
                     # (git does not need this step)
-                    if util.safehasattr(self.fileslog, "metadatastore"):
+                    if hasattr(self.fileslog, "metadatastore"):
                         keys = []
                         for f in added:
                             fctx = ctx[f]
@@ -2924,6 +2907,7 @@ class localrepository(object):
                 repo=self.ui.config("remotefilelog", "reponame"),
                 **loginfo,
             )
+
             return n
         finally:
             if tr:
@@ -3436,37 +3420,9 @@ def _openchangelog(repo):
             )
         )
 
-    if repo.ui.configbool("experimental", "use-rust-changelog"):
-        # Refresh Rust changelog object every time we (re)load the
-        # changelog. This is the simplest thing which matches all the
-        # Python cache invalidation logic exactly.
-        repo._rsrepo.invalidatechangelog()
-        inner = repo._rsrepo.changelog()
-        return changelog2.changelog(repo, inner, repo.ui.uiconfig())
-
-    if git.isgitstore(repo):
-        repo.ui.log("changelog_info", changelog_backend="git")
-        return changelog2.changelog.opengitsegments(repo, repo.ui.uiconfig())
-    if "lazytextchangelog" in repo.storerequirements:
-        repo.ui.log("changelog_info", changelog_backend="lazytext")
-        return changelog2.changelog.openlazytext(repo)
-    if "lazychangelog" in repo.storerequirements:
-        repo.ui.log("changelog_info", changelog_backend="lazy")
-        return changelog2.changelog.openlazy(repo)
-    if "hybridchangelog" in repo.storerequirements:
-        repo.ui.log("changelog_info", changelog_backend="hybrid")
-        return changelog2.changelog.openhybrid(repo)
-    if "doublewritechangelog" in repo.storerequirements:
-        if repo.ui.configbool("experimental", "lazy-commit-data"):
-            # alias of hybridchangelog
-            repo.ui.log("changelog_info", changelog_backend="hybrid")
-            return changelog2.changelog.openhybrid(repo)
-        else:
-            repo.ui.log("changelog_info", changelog_backend="doublewrite")
-            return changelog2.changelog.opendoublewrite(repo, repo.ui.uiconfig())
-    if "segmentedchangelog" in repo.storerequirements:
-        repo.ui.log("changelog_info", changelog_backend="segments")
-        return changelog2.changelog.opensegments(repo, repo.ui.uiconfig())
-
-    repo.ui.log("changelog_info", changelog_backend="rustrevlog")
-    return changelog2.changelog.openrevlog(repo, repo.ui.uiconfig())
+    # Refresh Rust changelog object every time we (re)load the
+    # changelog. This is the simplest thing which matches all the
+    # Python cache invalidation logic exactly.
+    repo._rsrepo.invalidatechangelog()
+    inner = repo._rsrepo.changelog()
+    return changelog2.changelog(repo, inner, repo.ui.uiconfig())

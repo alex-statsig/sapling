@@ -7,6 +7,7 @@
 
 import type {TypeaheadKind, TypeaheadResult} from './CommitInfoView/types';
 import type {InternalTypes} from './InternalTypes';
+import type {Serializable} from './serialize';
 import type {TrackEventName} from 'isl-server/src/analytics/eventNames';
 import type {TrackDataWithEventName} from 'isl-server/src/analytics/types';
 import type {GitHubDiffSummary} from 'isl-server/src/github/githubCodeReviewProvider';
@@ -68,11 +69,6 @@ export type DiffSummary = GitHubDiffSummary | InternalTypes['PhabricatorDiffSumm
  */
 export type DiffSignalSummary = 'running' | 'pass' | 'failed' | 'warning' | 'no-signal';
 
-/**
- * Detailed info about a Diff fetched individually when looking at the details
- */
-// TODO: export type DiffDetails = {};
-
 /** An error causing the entire Repository to not be accessible */
 export type RepositoryError =
   | {
@@ -105,6 +101,12 @@ export type ValidatedRepoInfo = {
   preferredSubmitCommand?: PreferredSubmitCommand;
 };
 
+export type ApplicationInfo = {
+  platformName: string;
+  version: string;
+  logFilePath: string;
+};
+
 export type CodeReviewSystem =
   | {
       type: 'github';
@@ -126,6 +128,11 @@ export type CodeReviewSystem =
     };
 
 export type PreferredSubmitCommand = 'pr' | 'ghstack';
+
+export type StableCommitMetadata = {
+  value: string;
+  description: string;
+};
 
 export type CommitInfo = {
   title: string;
@@ -161,7 +168,7 @@ export type CommitInfo = {
   totalFileCount: number;
   /** @see {@link DiffId} */
   diffId?: DiffId;
-  stableCommitMetadata?: string;
+  stableCommitMetadata?: Array<StableCommitMetadata>;
 };
 export type SuccessorInfo = {
   hash: string;
@@ -288,11 +295,28 @@ export type OperationProgress =
   | {id: string; kind: 'spawn'; queue: Array<string>}
   | {id: string; kind: 'stderr'; message: string}
   | {id: string; kind: 'stdout'; message: string}
+  // overally progress information, typically for a progress bar or progress not found directly in the stdout
+  | {id: string; kind: 'progress'; progress: ProgressStep}
+  // progress information for a specific commit, shown inline. Null hash means to apply the messasge to all hashes. Null message means to clear the message.
+  | {id: string; kind: 'inlineProgress'; hash?: string; message?: string}
   | {id: string; kind: 'exit'; exitCode: number; timestamp: number}
   | {id: string; kind: 'error'; error: string};
 
+export type ProgressStep = {
+  message: string;
+  progress?: number;
+  progressTotal?: number;
+};
+
 export type OperationCommandProgressReporter = (
-  ...args: ['spawn'] | ['stdout', string] | ['stderr', string] | ['exit', number]
+  ...args:
+    | ['spawn']
+    | ['stdout', string]
+    | ['stderr', string]
+    // null message -> clear inline progress for this hash. Null hash -> apply to all affected hashes (set message or clear)
+    | [type: 'inlineProgress', hash?: string, message?: string]
+    | ['progress', ProgressStep]
+    | ['exit', number]
 ) => void;
 
 export type OperationProgressEvent = {type: 'operationProgress'} & OperationProgress;
@@ -369,9 +393,11 @@ export type ConfigName =
   | 'isl.hasShownGettingStarted'
   // sapling config prefers foo-bar naming.
   | 'isl.pull-button-choice'
+  | 'isl.show-diff-number'
   | 'isl.experimental-features';
 
 export type ClientToServerMessage =
+  | {type: 'heartbeat'; id: string}
   | {
       type: 'refresh';
     }
@@ -387,7 +413,9 @@ export type ClientToServerMessage =
   | {type: 'typeahead'; kind: TypeaheadKind; query: string; id: string}
   | {type: 'requestRepoInfo'}
   | {type: 'requestApplicationInfo'}
-  | {type: 'fetchDiffSummaries'}
+  | {type: 'fetchDiffSummaries'; diffIds?: Array<DiffId>}
+  | {type: 'getSuggestedReviewers'; context: {paths: Array<string>}; key: string}
+  | {type: 'updateRemoteDiffMessage'; diffId: DiffId; title: string; description: string}
   | {type: 'pageVisibility'; state: PageVisibility}
   | {
       type: 'requestComparison';
@@ -407,6 +435,14 @@ export type ClientToServerMessage =
   | {type: 'unsubscribe'; kind: SubscriptionKind; subscriptionID: string}
   | {type: 'exportStack'; revs: string; assumeTracked?: Array<string>}
   | {type: 'importStack'; stack: ImportStack}
+  | {type: 'fetchFeatureFlag'; name: string}
+  | {type: 'fetchInternalUserInfo'}
+  | {
+      type: 'generateAICommitMessage';
+      id: string;
+      title: string;
+      comparison: Comparison;
+    }
   | PlatformSpecificClientToServerMessages;
 
 export type SubscriptionResultsData = {
@@ -429,13 +465,16 @@ export type ServerToClientMessage =
   | BeganFetchingSmartlogCommitsEvent
   | BeganFetchingUncommittedChangesEvent
   | FileABugProgressMessage
+  | {type: 'heartbeat'; id: string}
   | {type: 'gotConfig'; name: ConfigName; value: string | undefined}
   | {type: 'fetchedCommitMessageTemplate'; template: string}
   | {type: 'typeaheadResult'; id: string; result: Array<TypeaheadResult>}
-  | {type: 'applicationInfo'; platformName: string; version: string}
+  | {type: 'applicationInfo'; info: ApplicationInfo}
   | {type: 'repoInfo'; info: RepoInfo; cwd?: string}
   | {type: 'repoError'; error: RepositoryError | undefined}
   | {type: 'fetchedDiffSummaries'; summaries: Result<Map<DiffId, DiffSummary>>}
+  | {type: 'gotSuggestedReviewers'; reviewers: Array<string>; key: string}
+  | {type: 'updatedRemoteDiffMessage'; diffId: DiffId; error?: string}
   | {type: 'uploadFileResult'; id: string; result: Result<string>}
   | {type: 'comparison'; comparison: Comparison; data: ComparisonData}
   | {type: 'comparisonContextLines'; path: RepoRelativePath; lines: Array<string>}
@@ -450,6 +489,13 @@ export type ServerToClientMessage =
       error: string | undefined;
     }
   | {type: 'importedStack'; imported: ImportedStack; error: string | undefined}
+  | {type: 'fetchedFeatureFlag'; name: string; passes: boolean}
+  | {type: 'fetchedInternalUserInfo'; info: Serializable}
+  | {
+      type: 'generatedAICommitMessage';
+      message: Result<string>;
+      id: string;
+    }
   | OperationProgressEvent
   | PlatformSpecificServerToClientMessages;
 

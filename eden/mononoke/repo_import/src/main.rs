@@ -509,8 +509,10 @@ async fn move_bookmark(
                 Arc::new(AtomicBool::new(false)),
                 CommitSyncContext::RepoImport,
                 false,
+                Box::new(future::ready(())),
             )
-            .await?;
+            .await?
+            .await;
             let small_repo_cs_id = small_repo_back_sync_vars
                 .small_repo
                 .bookmarks()
@@ -1124,7 +1126,11 @@ async fn repo_import(
 
     // Importing process starts here
     if recovery_fields.import_stage == ImportStage::GitImport {
-        let prefs = GitimportPreferences::default();
+        // Import without submodules.
+        let prefs = GitimportPreferences {
+            submodules: false,
+            ..Default::default()
+        };
         let target = GitimportTarget::full();
         info!(ctx.logger(), "Started importing git commits to Mononoke");
         let uploader = import_direct::DirectUploader::new(
@@ -1149,7 +1155,7 @@ async fn repo_import(
             let stdout = BufReader::new(child.stdout.take().context("stdout not set up")?);
             let mut lines = stdout.lines();
             if let Some(line) = lines.next_line().await? {
-                git_hash::ObjectId::from_hex(line.as_bytes())
+                gix_hash::ObjectId::from_hex(line.as_bytes())
                     .context("Parsing git rev-parse output")?
             } else {
                 bail!("No lines returned by git rev-parse");

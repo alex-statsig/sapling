@@ -62,8 +62,8 @@ export function ContextMenus() {
             setState(null);
           }
           return;
-        } else if (e.type === 'click') {
-          // if the click is inside the context menu, don't dismiss
+        } else if (e.type === 'click' || e.type === 'scroll') {
+          // if click or scroll inside the context menu, don't dismiss
           if (findParentWithClassName(e.target as HTMLElement, 'context-menu-container')) {
             return;
           }
@@ -90,8 +90,8 @@ export function ContextMenus() {
   const topOrBottom = state.y > window.innerHeight / 2 ? 'bottom' : 'top';
   const leftOrRight = state.x > window.innerWidth / 2 ? 'right' : 'left';
   const yOffset = 10;
-  const xOffset = -5;
-  let position;
+  const xOffset = -10; // var(--pad)
+  let position: React.CSSProperties;
   if (topOrBottom === 'top') {
     if (leftOrRight === 'left') {
       position = {top: state.y + yOffset, left: state.x + xOffset};
@@ -108,6 +108,10 @@ export function ContextMenus() {
       };
     }
   }
+  position.maxHeight =
+    window.innerHeight -
+    ((position.top as number | null) ?? 0) -
+    ((position.bottom as number | null) ?? 0);
 
   return (
     <div
@@ -118,7 +122,9 @@ export function ContextMenus() {
       data-testid="context-menu-container"
       style={position}>
       {topOrBottom === 'top' ? (
-        <div className={`context-menu-arrow-top context-menu-arrow-${leftOrRight}`} />
+        <div
+          className={`context-menu-arrow context-menu-arrow-top context-menu-arrow-${leftOrRight}`}
+        />
       ) : null}
       <div className="context-menu">
         {state.items.map((item, i) =>
@@ -153,7 +159,9 @@ export function ContextMenus() {
       </div>
 
       {topOrBottom === 'bottom' ? (
-        <div className={`context-menu-arrow-bottom context-menu-arrow-${leftOrRight}`} />
+        <div
+          className={`context-menu-arrow context-menu-arrow-bottom context-menu-arrow-${leftOrRight}`}
+        />
       ) : null}
     </div>
   );

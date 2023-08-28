@@ -539,7 +539,7 @@ def annotate(ui, repo, *pats, **opts):
 @command(
     "archive|ar|arc|arch|archi|archiv",
     [
-        ("", "no-decode", None, _("do not pass files through decoders")),
+        ("", "no-decode", None, _("do not pass files through decoders (DEPRECATED)")),
         ("p", "prefix", "", _("directory prefix for files in archive"), _("PREFIX")),
         ("r", "rev", "", _("revision to distribute"), _("REV")),
         ("t", "type", "", _("type of distribution to create"), _("TYPE")),
@@ -615,7 +615,7 @@ def archive(ui, repo, dest, **opts):
                 "requires an explicit set of files to be archived"
             )
         )
-    archival.archive(repo, dest, node, kind, not opts.get("no_decode"), match, prefix)
+    archival.archive(repo, dest, node, kind, match, prefix)
 
 
 @command(
@@ -1547,7 +1547,7 @@ def bundle(ui, repo, fname, dest=None, **opts):
     [
         ("o", "output", "", _("print output to file with formatted name"), _("FORMAT")),
         ("r", "rev", "", _("print the given revision"), _("REV")),
-        ("", "decode", None, _("apply any matching decode filter")),
+        ("", "decode", None, _("apply any matching decode filter (DEPRECATED)")),
     ]
     + walkopts
     + formatteropts,
@@ -1891,10 +1891,9 @@ def editconfig(ui, repo, *values, **opts):
             raise error.Abort(_("can't use --local outside a repository"))
         paths = [repo.localvfs.join(ident.configrepofile())]
     elif target == "system":
-        path = ident.systemconfigpath()
-        if not path:
+        paths = ident.systemconfigpaths()
+        if not paths:
             raise error.Abort(_("can't determine system config path"))
-        paths = [path]
     elif target == "user":
         paths = ident.userconfigpaths()
     else:
@@ -2353,7 +2352,7 @@ def files(ui, repo, *pats, **opts):
     fmt = "%s" + end
 
     m = scmutil.match(ctx, pats, opts)
-    if isinstance(ctx, context.workingctx) and util.safehasattr(repo, "sparsematch"):
+    if isinstance(ctx, context.workingctx) and hasattr(repo, "sparsematch"):
         m = matchmod.intersectmatchers(m, repo.sparsematch())
 
     ui.pager("files")
@@ -3272,7 +3271,7 @@ def histgrep(ui, repo, pattern, *pats, **opts):
             lend = begin - 1
             yield linenum, mstart - lstart, mend - lstart, body[lstart:lend]
 
-    class linestate(object):
+    class linestate:
         def __init__(self, line, linenum, colstart, colend):
             self.line = line
             self.linenum = linenum
@@ -3891,7 +3890,7 @@ def init(ui, dest=".", **opts):
             _("please use '@prog@ init --git %s' for a better experience") % dest
         )
     elif ui.configbool("format", "use-eager-repo"):
-        bindings.eagerepo.EagerRepo.open(destpath, ui._rcfg)
+        bindings.eagerepo.EagerRepo.open(destpath)
     else:
         if util.url(destpath).scheme == "bundle":
             hg.repository(ui, destpath, create=True)

@@ -25,6 +25,8 @@
 #include <stdexcept>
 #include "eden/fs/config/CheckoutConfig.h"
 #include "eden/fs/config/EdenConfig.h"
+#include "eden/fs/config/InodeCatalogOptions.h"
+#include "eden/fs/config/InodeCatalogType.h"
 #include "eden/fs/inodes/CacheHint.h"
 #include "eden/fs/inodes/FsChannel.h"
 #include "eden/fs/inodes/InodeNumber.h"
@@ -89,6 +91,8 @@ class TreeEntry;
 
 class RenameLock;
 class SharedRenameLock;
+
+constexpr int kMaxSymlinkChainDepth = 40; // max depth of symlink chain
 
 /**
  * Represents an inode state transition and the duration it took for the event
@@ -266,6 +270,52 @@ struct SetPathObjectIdObjectAndPath {
   }
 };
 
+struct ParentCommitState {
+  /** RootId that the working copy is checked out to */
+  RootId checkedOutRootId;
+  std::shared_ptr<const Tree> checkedOutRootTree;
+  /**
+   * RootId that the working copy is reset to. This is usually the same as
+   * checkedOutRootId, except when a reset is done, in which case it will
+   * differ.
+   */
+  RootId workingCopyParentRootId;
+
+  /**
+   * No NORMAL or FORCE checkout are currently ongoing. A DRY_RUN might be
+   * started.
+   */
+  struct NoOngoingCheckout {};
+
+  /** A NORMAL or FORCE checkout is ongoing. */
+  struct CheckoutInProgress {};
+
+  /** A checkout was previously interrupted */
+  struct InterruptedCheckout {
+    RootId fromCommit;
+    RootId toCommit;
+  };
+
+  /**
+   * At mount time, the checkoutState can either be in the NoOngoingCheckout,
+   * or in the InterruptedCheckout state in the case where EdenFS got killed or
+   * crashed during a checkout operation.
+   *
+   * At the beginning of (non DRY_RUN) checkout, the checkoutState will be set
+   * to CheckoutInProgress, and reset to NoOngoingCheckout at the end of it.
+   *
+   * The other allowed transition is from InterruptedCheckout to
+   * CheckoutInProgress when resuming an interrupted checkout operation.
+   */
+  using CheckoutState =
+      std::variant<NoOngoingCheckout, CheckoutInProgress, InterruptedCheckout>;
+  CheckoutState checkoutState;
+
+  bool isCheckoutInProgressOrInterrupted() const {
+    return !std::holds_alternative<NoOngoingCheckout>(checkoutState);
+  }
+};
+
 /**
  * EdenMount contains all of the data about a specific eden mount point.
  *
@@ -293,7 +343,8 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
       std::shared_ptr<ServerState> serverState,
       std::unique_ptr<Journal> journal,
       EdenStatsPtr stats,
-      std::optional<Overlay::InodeCatalogType> inodeCatalogType = std::nullopt);
+      std::optional<InodeCatalogType> inodeCatalogType = std::nullopt,
+      std::optional<InodeCatalogOptions> inodeCatalogOptions = std::nullopt);
 
   /**
    * Asynchronous EdenMount initialization - post instantiation.
@@ -363,7 +414,7 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
    * function immediately returns a Future which will complete at the same time
    * the original call to unmount() completes.
    */
-  FOLLY_NODISCARD folly::Future<folly::Unit> unmount();
+  FOLLY_NODISCARD folly::SemiFuture<folly::Unit> unmount();
 
   /**
    * Get the current state of this mount.
@@ -709,7 +760,7 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
   folly::Future<CheckoutResult> checkout(
       TreeInodePtr rootInode,
       const RootId& snapshotHash,
-      std::optional<pid_t> clientPid,
+      OptionalProcessId clientPid,
       folly::StringPiece thriftMethodCaller,
       CheckoutMode checkoutMode = CheckoutMode::NORMAL);
 
@@ -1105,8 +1156,14 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
   /**
    * Returns overlay type based on settings.
    */
-  Overlay::InodeCatalogType getInodeCatalogType(
-      std::optional<Overlay::InodeCatalogType> inodeCatalogType);
+  InodeCatalogType getInodeCatalogType(
+      std::optional<InodeCatalogType> inodeCatalogType);
+
+  /**
+   * Returns InodeCatalogOptions options based on settings.
+   */
+  InodeCatalogOptions getInodeCatalogOptions(
+      std::optional<InodeCatalogOptions> inodeCatalogOptions);
 
   EdenMount(
       std::unique_ptr<CheckoutConfig> checkoutConfig,
@@ -1115,7 +1172,8 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
       std::shared_ptr<ServerState> serverState,
       std::unique_ptr<Journal> journal,
       EdenStatsPtr stats,
-      std::optional<Overlay::InodeCatalogType> inodeCatalogType = std::nullopt);
+      std::optional<InodeCatalogType> inodeCatalogType = std::nullopt,
+      std::optional<InodeCatalogOptions> inodeCatalogOptions = std::nullopt);
 
   // Forbidden copy constructor and assignment operator
   EdenMount(EdenMount const&) = delete;
@@ -1199,8 +1257,6 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
   friend class TreePrefetchLease;
   void treePrefetchFinished() noexcept;
 
-  static constexpr int kMaxSymlinkChainDepth = 40; // max depth of symlink chain
-
   const std::unique_ptr<const CheckoutConfig> checkoutConfig_;
 
   /**
@@ -1255,19 +1311,6 @@ class EdenMount : public std::enable_shared_from_this<EdenMount> {
    * hold the rename lock.
    */
   folly::SharedMutex renameMutex_;
-
-  struct ParentCommitState {
-    // RootId that the working copy is checked out to
-    RootId checkedOutRootId;
-    std::shared_ptr<const Tree> checkedOutRootTree;
-    // RootId that the working copy is reset to. This is usually the same as
-    // checkedOutRootId, except when a reset is done, in which case it will
-    // differ.
-    RootId workingCopyParentRootId;
-    bool checkoutInProgress = false;
-    std::optional<std::tuple<RootId, RootId>> checkoutOriginalTrees;
-    std::optional<pid_t> checkoutPid;
-  };
 
   /**
    * The IDs of the parent commit of the working directory.

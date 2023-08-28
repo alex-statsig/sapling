@@ -53,11 +53,7 @@ inline mode_t ftype3ToMode(ftype3 type) {
     case ftype3::NF3CHR:
       return S_IFCHR;
     case ftype3::NF3LNK:
-#ifdef _WIN32
-      return _S_IFLNK;
-#else
       return S_IFLNK;
-#endif
     case ftype3::NF3SOCK:
 #ifdef _WIN32
       return _S_IFSOCK;
@@ -126,7 +122,7 @@ inline fattr3 statToFattr3(const struct stat& stat) {
   return fattr3{
       /*type*/ modeToFtype3(stat.st_mode),
       /*mode*/ modeToNfsMode(stat.st_mode),
-#ifndef WIN32
+#ifndef _WIN32
       /*nlink*/ folly::to_narrow(stat.st_nlink),
       /*uid*/ stat.st_uid,
       /*gid*/ stat.st_gid,
@@ -136,7 +132,7 @@ inline fattr3 statToFattr3(const struct stat& stat) {
       /*gid*/ uint32_t(stat.st_gid),
 #endif
       /*size*/ folly::to_unsigned(stat.st_size),
-#ifndef WIN32
+#ifndef _WIN32
       /*used*/ folly::to_unsigned(stat.st_blocks) * 512u,
 #else
       /*used*/ 0,

@@ -570,7 +570,7 @@ def _getolddrafts(repo, reverseindex):
 
 
 def _cachedgetolddrafts(repo, nodedict):
-    if not util.safehasattr(repo, "_undoolddraftcache"):
+    if not hasattr(repo, "_undoolddraftcache"):
         repo._undoolddraftcache = {}
     cache = repo._undoolddraftcache
     if repo.ui.configbool("experimental", "narrow-heads"):
@@ -650,7 +650,7 @@ def _getoldworkingcopyparent(repo, reverseindex):
 
 
 def _cachedgetoldworkingcopyparent(repo, wkpnode):
-    if not util.safehasattr(repo, "_undooldworkingparentcache"):
+    if not hasattr(repo, "_undooldworkingparentcache"):
         repo._undooldworkingparentcache = {}
     cache = repo._undooldworkingparentcache
     key = wkpnode
@@ -676,6 +676,26 @@ def _oldworkingcopyparent(repo, subset, x):
     )
     revs = _getoldworkingcopyparent(repo, reverseindex)
     return subset & smartset.baseset(revs, repo=repo)
+
+
+@revsetpredicate("oldnonobsworkingcopyparent")
+def _oldnonobsworkingcopyparent(repo, subset, x):
+    """``oldnonobsworkingcopyparent()``
+    previous non-obsolete working copy parent
+    """
+    max_candidates = repo.ui.configint(
+        "experimental", "max-old-nonobs-commit-candidates", 50
+    )
+    current_rev = repo["."].rev()
+    for i in range(1, max_candidates + 1):
+        revs = _getoldworkingcopyparent(repo, i)
+        rev = revs.first()
+        if (
+            not repo[rev].obsolete()
+            and rev != current_rev  # this is for 'amend' and 'restack' case
+        ):
+            return subset & smartset.baseset(revs, repo=repo)
+    raise error.Abort(_("not found previous non-obsolete commit"))
 
 
 # Templates
@@ -817,7 +837,7 @@ def oldworkingparenttemplate(context, mapping, args):
         ("p", "preview", False, _("see smartlog-like preview of future undo " "state")),
     ],
 )
-def undo(ui, repo, *args, **opts):
+def undo(ui, repo, **opts):
     """undo the last local command
 
     Reverse the effects of the last local command. A local command is one that
@@ -930,7 +950,7 @@ def undo(ui, repo, *args, **opts):
                 del opts["interactive"]
                 opts["absolute"] = "absolute"
                 opts["step"] = self.index
-                undo(ui, repo, *args, **opts)
+                undo(ui, repo, **opts)
                 return
 
         viewobj = undopreview(ui, repo, reverseindex)

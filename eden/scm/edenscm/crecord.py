@@ -83,7 +83,7 @@ def checkcurses(ui):
     return curses and ui.interface("chunkselector") == "curses"
 
 
-class patchnode(object):
+class patchnode:
     """abstract class for patch graph nodes
     (i.e. patchroot, header, hunk, hunkline)
     """
@@ -558,7 +558,7 @@ def chunkselector(ui, headerlist, operation=None):
     ui.write(_("starting interactive selection\n"))
     chunkselector = curseschunkselector(headerlist, ui, operation)
     origsigtstp = sentinel = object()
-    if util.safehasattr(signal, "SIGTSTP"):
+    if hasattr(signal, "SIGTSTP"):
         origsigtstp = util.getsignal(signal.SIGTSTP)
     try:
         with progress.suspend(), util.traced("crecord", cat="blocked"):
@@ -605,7 +605,7 @@ _headermessages: Dict[Optional[str], str] = {  # {operation: text}
 }
 
 
-class curseschunkselector(object):
+class curseschunkselector:
     def __init__(self, headerlist, ui, operation=None):
         # put the headers into a patch object
         self.headerlist = patch(headerlist)
@@ -1782,7 +1782,7 @@ are you sure you want to review/edit and confirm the selected changes [yn]?
         """
 
         origsigwinch = sentinel = object()
-        if util.safehasattr(signal, "SIGWINCH"):
+        if hasattr(signal, "SIGWINCH"):
             origsigwinch = util.signal(signal.SIGWINCH, self.sigwinchhandler)
         try:
             return self._main(stdscr)

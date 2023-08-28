@@ -800,7 +800,7 @@ def validdest(repo, old, new):
         # (new != nullrev has been excluded by the previous check)
         return True
     elif mutation.enabled(repo):
-        return new.node() in mutation.foreground(repo, [old.node()])
+        return mutation.foreground_contains(repo, [old.node()], new.node())
     else:
         # still an independent clause as it is lazier (and therefore faster)
         return old.descendant(new)
@@ -1138,7 +1138,8 @@ def saveremotenames(repo, remotebookmarks, override: bool = True) -> None:
         _recordbookmarksupdate(repo, journal)
 
         # Old paths have been deleted, refresh remotenames
-        if util.safehasattr(repo, "_remotenames"):
+        if hasattr(repo, "_remotenames"):
+            # This will bump _changecount.
             repo._remotenames.clearnames()
 
         # If narrowheads is enabled, updating remotenames can affect phases
@@ -1413,7 +1414,7 @@ def _recordbookmarksupdate(repo, changes) -> None:
     """writes remotebookmarks changes to the journal
 
     'changes' - is a list of tuples '(remotebookmark, oldnode, newnode)''"""
-    if util.safehasattr(repo, "journal"):
+    if hasattr(repo, "journal"):
         repo.journal.recordmany(journalremotebookmarktype, changes)
 
 

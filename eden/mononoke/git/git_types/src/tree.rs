@@ -18,7 +18,7 @@ use anyhow::Error;
 use mononoke_types::hash::RichGitSha1;
 use mononoke_types::MPathElement;
 
-use crate::errors::ErrorKind;
+use crate::errors::MononokeGitError;
 use crate::mode;
 use crate::thrift;
 use crate::BlobHandle;
@@ -39,7 +39,7 @@ impl TreeHandle {
     }
 
     pub fn blobstore_key(&self) -> String {
-        format!("git.tree.{}", self.oid)
+        format!("git_tree.{}", self.oid)
     }
 }
 
@@ -118,7 +118,7 @@ impl TryFrom<thrift::TreeMember> for TreeMember {
         match t {
             thrift::TreeMember::Blob(blob) => Ok(Self::Blob(blob.try_into()?)),
             thrift::TreeMember::Tree(tree) => Ok(Self::Tree(tree.try_into()?)),
-            thrift::TreeMember::UnknownField(..) => Err(ErrorKind::InvalidThrift.into()),
+            thrift::TreeMember::UnknownField(..) => Err(MononokeGitError::InvalidThrift.into()),
         }
     }
 }
@@ -189,6 +189,20 @@ impl TreeBuilder {
     // TODO: Can we verify members here (git_path_isvalid)
     pub fn new(members: HashMap<MPathElement, TreeMember>) -> Self {
         Self { members }
+    }
+
+    pub fn into_tree_with_bytes(self) -> (Vec<u8>, Tree) {
+        let mut object_buff = Vec::new();
+        self.write_serialized_object(&mut object_buff)
+            .expect("Writes to Vec cannot fail");
+
+        let oid = ObjectKind::Tree.create_oid(&object_buff);
+
+        let tree = Tree {
+            handle: TreeHandle { oid },
+            members: self.members,
+        };
+        (object_buff, tree)
     }
 }
 

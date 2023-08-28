@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import sys
 import textwrap
 import typing
 from textwrap import dedent
@@ -82,6 +83,8 @@ class EdenHgTestCase(testcase.EdenTestCase, metaclass=abc.ABCMeta):
 
     repo: hgrepo.HgRepository
     backing_repo: hgrepo.HgRepository
+    enable_windows_symlinks: bool = False
+    inode_catalog_type: Optional[str] = None
 
     def setup_eden_test(self) -> None:
         super().setup_eden_test()
@@ -91,14 +94,31 @@ class EdenHgTestCase(testcase.EdenTestCase, metaclass=abc.ABCMeta):
 
         # Edit the edenrc file to set up post-clone hooks that will correctly
         # populate the .hg directory inside the eden client.
-        self.eden.clone(self.backing_repo.path, self.mount, allow_empty=True)
+        self.eden.clone(
+            self.backing_repo.path,
+            self.mount,
+            allow_empty=True,
+            enable_windows_symlinks=self.enable_windows_symlinks,
+        )
 
         # Now create the repository object that refers to the eden client
         self.repo = hgrepo.HgRepository(self.mount, system_hgrc=self.system_hgrc)
 
+    def edenfs_extra_config(self) -> Optional[Dict[str, List[str]]]:
+        configs = super().edenfs_extra_config()
+        if (inode_catalog_type := self.inode_catalog_type) is not None:
+            if configs is None:
+                configs = {}
+            configs["overlay"] = [f'inode-catalog-type = "{inode_catalog_type}"']
+        return configs
+
     def create_backing_repo(self) -> hgrepo.HgRepository:
+        if self.enable_windows_symlinks:
+            init_configs = ["experimental.windows-symlinks=True"]
+        else:
+            init_configs = []
         hgrc = self.get_hgrc()
-        repo = self.create_hg_repo("main", hgrc=hgrc)
+        repo = self.create_hg_repo("main", hgrc=hgrc, init_configs=init_configs)
         self.populate_backing_repo(repo)
         return repo
 
@@ -383,7 +403,7 @@ class EdenHgTestCase(testcase.EdenTestCase, metaclass=abc.ABCMeta):
         self.assertEqual([], self.repo.journal())
 
 
-class JournalEntry(object):
+class JournalEntry:
     """
     JournalEntry describes an expected journal entry.
     It is intended to pass to EdenHgTestCase.assert_journal()
@@ -458,18 +478,34 @@ class JournalEntry(object):
         return command[m.end() :]
 
 
+MixinList = List[Tuple[str, List[Type[Any]]]]
+
+
 def _replicate_hg_test(
     test_class: Type[EdenHgTestCase],
 ) -> Iterable[Tuple[str, Type[EdenHgTestCase]]]:
-    class NFSEdenHgTestCase(testcase.NFSTestMixin, test_class):
-        pass
-
-    class DefaultEdenHgTestCase(test_class):
-        pass
-
-    yield "TreeOnly", typing.cast(Type[EdenHgTestCase], DefaultEdenHgTestCase)
+    tree_variants: MixinList = [("TreeOnly", [])]
     if eden.config.HAVE_NFS:
-        yield "TreeOnlyNFS", typing.cast(Type[EdenHgTestCase], NFSEdenHgTestCase)
+        tree_variants.append(("TreeOnlyNFS", [testcase.NFSTestMixin]))
+
+    overlay_variants: MixinList = [("", [])]
+    if sys.platform == "win32":
+        overlay_variants.append(("InMemory", [InMemoryOverlayTestMixin]))
+
+    for tree_label, tree_mixins in tree_variants:
+        for overlay_label, overlay_mixins in overlay_variants:
+
+            class VariantHgRepoTest(*tree_mixins, *overlay_mixins, test_class):
+                pass
+
+            yield (
+                f"{tree_label}{overlay_label}",
+                typing.cast(Type[EdenHgTestCase], VariantHgRepoTest),
+            )
+
+
+class InMemoryOverlayTestMixin:
+    inode_catalog_type = "inmemory"
 
 
 hg_test = testcase.test_replicator(_replicate_hg_test)

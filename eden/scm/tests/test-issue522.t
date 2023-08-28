@@ -1,7 +1,5 @@
-#chg-compatible
 #debugruntest-compatible
 
-  $ setconfig workingcopy.ruststatus=False
 https://bz.mercurial-scm.org/522
 
 In the merge below, the file "foo" has the same contents in both
@@ -53,8 +51,8 @@ revision.
   c6fc755d7e68f49f880599da29f15add41f42f5a 644   foo
 
   $ hg debugindex foo
-     rev    offset  length  ..... linkrev nodeid       p1           p2 (re)
-       0         0       5  .....       0 2ed2a3912a0b 000000000000 000000000000 (re)
-       1         5       9  .....       1 6f4310b00b9a 2ed2a3912a0b 000000000000 (re)
-       2        14       5  .....       2 c6fc755d7e68 6f4310b00b9a 000000000000 (re)
+     rev linkrev nodeid       p1           p2
+       0       0 2ed2a3912a0b 000000000000 000000000000
+       1       1 6f4310b00b9a 2ed2a3912a0b 000000000000
+       2       2 c6fc755d7e68 6f4310b00b9a 000000000000
 

@@ -24,7 +24,7 @@ namespace facebook::eden {
 CheckoutContext::CheckoutContext(
     EdenMount* mount,
     CheckoutMode checkoutMode,
-    std::optional<pid_t> clientPid,
+    OptionalProcessId clientPid,
     folly::StringPiece thriftMethodName,
     const std::unordered_map<std::string, std::string>* requestInfo)
     : checkoutMode_{checkoutMode},
@@ -33,7 +33,9 @@ CheckoutContext::CheckoutContext(
           clientPid,
           ObjectFetchContext::Cause::Thrift,
           thriftMethodName,
-          requestInfo)} {}
+          requestInfo)},
+      windowsSymlinksEnabled_{
+          mount_->getCheckoutConfig()->getEnableWindowsSymlinks()} {}
 
 CheckoutContext::~CheckoutContext() {}
 
@@ -48,7 +50,8 @@ void CheckoutContext::start(
   if (!isDryRun()) {
     std::optional<RootId> oldParent;
     if (parentLock) {
-      XCHECK(parentLock->checkoutInProgress);
+      XCHECK(std::holds_alternative<ParentCommitState::CheckoutInProgress>(
+          parentLock->checkoutState));
       oldParent = parentLock->workingCopyParentRootId;
       // Update the in-memory snapshot ID
       parentLock->checkedOutRootId = newSnapshot;
@@ -116,8 +119,8 @@ void CheckoutContext::addConflict(ConflictType type, RelativePathPiece path) {
       << "attempted to add error using addConflict(): " << path;
 
   CheckoutConflict conflict;
-  *conflict.path_ref() = std::string{path.value()};
-  *conflict.type_ref() = type;
+  conflict.path_ref() = std::string{path.value()};
+  conflict.type_ref() = type;
   conflicts_.wlock()->push_back(std::move(conflict));
 }
 
@@ -152,9 +155,9 @@ void CheckoutContext::addError(
 
   auto path = parentPath + name;
   CheckoutConflict conflict;
-  *conflict.path_ref() = path.value();
-  *conflict.type_ref() = ConflictType::ERROR;
-  *conflict.message_ref() = folly::exceptionStr(ew).toStdString();
+  conflict.path_ref() = path.value();
+  conflict.type_ref() = ConflictType::ERROR;
+  conflict.message_ref() = folly::exceptionStr(ew).toStdString();
   conflicts_.wlock()->push_back(std::move(conflict));
 }
 } // namespace facebook::eden

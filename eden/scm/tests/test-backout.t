@@ -1,8 +1,6 @@
-#chg-compatible
 #debugruntest-compatible
 
   $ eagerepo
-  $ setconfig workingcopy.ruststatus=false
 
   $ configure modern
   $ newrepo basic

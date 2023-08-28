@@ -1,9 +1,8 @@
-#chg-compatible
 #debugruntest-compatible
   $ configure modern
 
   $ setconfig paths.default=test:e1 ui.traceback=1
-  $ export LOG=edenscm::eagerpeer=trace,eagerepo=trace
+  $ export LOG=edenscm::eagerpeer=trace,eagerepo::api=trace
 
 Disable SSH:
 
@@ -224,3 +223,86 @@ Make a commit on tip, and amend. They do not trigger remote lookups:
   TRACE dag::cache: cached missing 893a1eb784b46325fb3062573ba15a22780ebe4a (definitely missing)
   DEBUG dag::cache: reusing cache (1 missing)
   DEBUG dag::cache: reusing cache (1 missing)
+
+Test that auto pull invalidates public() properly:
+
+# Server: Prepare public (P20, master) and draft (D9) branches
+
+    $ cd
+    $ hg init server-autopull --config format.use-eager-repo=True
+    $ drawdag --cwd server-autopull << 'EOS'
+    >     D9
+    >     :
+    > P20 D1  # bookmark master = P20
+    >  : /
+    > P10
+    >  :
+    > P01
+    > EOS
+
+# Client: Fetch the initial master, using lazy changelog.
+
+    $ cd
+    $ newremoterepo
+    $ setconfig paths.default=test:server-autopull
+    $ hg debugchangelog --migrate lazy
+    $ LOG= hg pull -q -B master
+
+# Server: Move "master" forward P20 -> P99.
+
+    $ drawdag --cwd ~/server-autopull << 'EOS'
+    > P99  # bookmark master = P99
+    >  :
+    > P21
+    >  |
+    > desc(P20)
+    > EOS
+
+# Client: autopull D9 and move master forward, then calculate a revset
+# containing "public()" should not require massive "resolve remotely" requests.
+# There should be no "DEBUG dag::protocol: resolve ids (76) remotely" below.
+
+    $ LOG=dag::protocol=debug hg log -r "only($D9,public())" -T '{desc}\n'
+    DEBUG dag::protocol: resolve names [428b6ef7fec737262ee83ba89e4fab5e3a07db44] remotely
+    pulling '428b6ef7fec737262ee83ba89e4fab5e3a07db44' from 'test:server-autopull'
+    DEBUG dag::protocol: resolve names [a81a182e51718edfeccb2f62846c28c7b83de6f1] remotely
+    DEBUG dag::protocol: resolve names [428b6ef7fec737262ee83ba89e4fab5e3a07db44] remotely
+    DEBUG dag::protocol: resolve ids [97] remotely
+    D1
+    D2
+    D3
+    D4
+    D5
+    D6
+    D7
+    D8
+    D9
+    >>> assert 'resolve ids (' not in _
+
+Test that filtering revset does not use sequential fetches.
+
+  $ cd
+  $ hg init server-filtering-revset --config format.use-eager-repo=True
+  $ drawdag --cwd ~/server-filtering-revset << 'EOS'
+  > P01  # bookmark master = P01
+  > EOS
+
+  $ cd
+  $ newremoterepo
+  $ setconfig paths.default=test:server-filtering-revset
+  $ hg debugchangelog --migrate lazy
+  $ LOG= hg pull -q -B master
+
+  $ drawdag --cwd ~/server-filtering-revset << 'EOS'
+  > P30  # bookmark master = P30
+  >  :
+  > P01
+  > EOS
+
+  $ LOG= hg pull -q -B master
+
+  $ LOG=dag::protocol=trace,eagerepo::api=debug hg log -r "reverse(master~20::master) & not(file(r're:.*'))"
+  DEBUG dag::protocol: resolve ids [9] remotely
+  DEBUG dag::protocol: resolve ids [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27] remotely
+  DEBUG eagerepo::api: revlog_data * (glob)
+  >>> assert _.count('revlog_data') == 1 and 0 < _.count('resolve id') < 3

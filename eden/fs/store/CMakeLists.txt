@@ -16,12 +16,14 @@ add_library(
 target_link_libraries(
   eden_store
   PUBLIC
+    edencommon::edencommon_os
     eden_config
     eden_model
     eden_model_git
     eden_service_thrift_cpp
     eden_sqlite
     eden_store_filter
+    eden_telemetry
     eden_utils
     fb303::fb303
     edencommon::edencommon_utils

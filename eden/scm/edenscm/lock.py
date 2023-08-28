@@ -29,7 +29,7 @@ if pycompat.iswindows:
     from . import win32
 
 
-class _emptylockinfo(object):
+class _emptylockinfo:
     def getwarning(self, l):
         return _("waiting for lock on %r") % l.desc
 
@@ -38,7 +38,7 @@ emptylockinfo = _emptylockinfo()
 defaultlockwaitwarntimeout = 3
 
 
-class lockinfo(object):
+class lockinfo:
     """Information about who is holding the lock.
 
     Does not have write side-effect (ex. take or release a lock).
@@ -181,7 +181,7 @@ def trylock(
     return l
 
 
-class lock(object):
+class lock:
     """An advisory lock held by one process to control access to a set
     of files.  Non-cooperating processes or incorrectly written scripts
     can ignore Mercurial's locking scheme and stomp all over the
@@ -226,7 +226,13 @@ class lock(object):
 
         self.delay = self.lock()
         if self.acquirefn:
-            self.acquirefn()
+            try:
+                self.acquirefn()
+            except:  # re-raises
+                # Release ourself immediately so locks are released in reverse order
+                # if acquirefn crashes for second lock in a "with" statement.
+                self.release()
+                raise
 
     def __enter__(self):
         return self

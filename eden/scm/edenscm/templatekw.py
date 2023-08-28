@@ -31,7 +31,7 @@ from .i18n import _
 from .node import hex, nullid
 
 
-class _hybrid(object):
+class _hybrid:
     """Wrapper for list or dict to support legacy template
 
     This class allows us to handle both:
@@ -92,7 +92,7 @@ class _hybrid(object):
         return getattr(self._values, name)
 
 
-class _mappable(object):
+class _mappable:
     """Wrapper for non-list/dict object to support map operation
 
     This class allows us to handle both:
@@ -148,7 +148,7 @@ def unwraphybrid(thing):
 
 def unwrapvalue(thing):
     """Move the inner value object out of the wrapper"""
-    if not util.safehasattr(thing, "_value"):
+    if not hasattr(thing, "_value"):
         return thing
     return thing._value
 
@@ -162,7 +162,7 @@ def wraphybridvalue(container, key, value: _mappable) -> _mappable:
     makemap = getattr(container, "_makemap", None)
     if makemap is None:
         return value
-    if util.safehasattr(value, "_makemap"):
+    if hasattr(value, "_makemap"):
         # a nested hybrid list/dict, which has its own way of map operation
         return value
     return _mappable(None, key, value, makemap)

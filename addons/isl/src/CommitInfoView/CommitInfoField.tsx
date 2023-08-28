@@ -12,6 +12,7 @@ import {T} from '../i18n';
 import {SeeMoreContainer} from './SeeMoreContainer';
 import {CommitInfoTextArea} from './TextArea';
 import {CommitInfoTextField} from './TextField';
+import {extractTokens, TokensList} from './Tokens';
 import {Section, SmallCapsTitle} from './utils';
 import {Fragment} from 'react';
 import {Icon} from 'shared/Icon';
@@ -50,6 +51,7 @@ export function CommitInfoField({
             </SmallCapsTitle>
             <CommitInfoTextArea
               kind={field.type}
+              fieldConfig={field}
               name={field.key}
               autoFocus={autofocus ?? false}
               editedMessage={editedFieldContent}
@@ -73,8 +75,12 @@ export function CommitInfoField({
       </>
     );
   } else {
-    const Wrapper = field.type === 'field' ? Fragment : SeeMoreContainer;
-    return isBeingEdited ? (
+    const Wrapper = field.type === 'textarea' ? SeeMoreContainer : Fragment;
+    if (field.type === 'read-only' && !content) {
+      // don't render empty read-only fields, since you can't "click to edit"
+      return null;
+    }
+    return field.type !== 'read-only' && isBeingEdited ? (
       <Section className="commit-info-field-section">
         <SmallCapsTitle>
           <Icon icon={field.icon} />
@@ -87,16 +93,19 @@ export function CommitInfoField({
             editedMessage={editedFieldContent}
             setEditedCommitMessage={setEditedField}
             typeaheadKind={field.typeaheadKind}
+            maxTokens={field.maxTokens}
           />
         ) : (
           <CommitInfoTextArea
             kind={field.type}
+            fieldConfig={field}
             name={field.key}
             autoFocus={autofocus ?? false}
             editedMessage={editedFieldContent}
             setEditedCommitMessage={setEditedField}
           />
         )}
+        {extra}
       </Section>
     ) : (
       <Section>
@@ -115,7 +124,15 @@ export function CommitInfoField({
               )}
             </SmallCapsTitle>
             {content ? (
-              <div>{content}</div>
+              field.type === 'field' ? (
+                <div className="commit-info-tokenized-field">
+                  <TokensList
+                    tokens={Array.isArray(content) ? content : extractTokens(content)[0]}
+                  />
+                </div>
+              ) : (
+                <div>{content}</div>
+              )
             ) : (
               <span className="empty-description subtle">
                 {readonly ? (
@@ -131,6 +148,7 @@ export function CommitInfoField({
               </span>
             )}
           </ClickToEditField>
+          {extra}
         </Wrapper>
       </Section>
     );
@@ -147,23 +165,23 @@ function ClickToEditField({
   /** function to run when you click to edit. If null, the entire field will be non-editable. */
   startEditingField?: () => void;
   fieldKey: string;
-  kind: 'title' | 'field' | 'textarea';
+  kind: 'title' | 'field' | 'textarea' | 'read-only';
 }) {
-  const editable = startEditingField != null;
+  const editable = startEditingField != null && kind !== 'read-only';
   const renderKey = fieldKey.toLowerCase().replace(/\s/g, '-');
   return (
     <div
       className={`commit-info-rendered-${kind}${editable ? '' : ' non-editable'}`}
       data-testid={`commit-info-rendered-${renderKey}`}
       onClick={
-        startEditingField != null
+        startEditingField != null && kind !== 'read-only'
           ? () => {
               startEditingField();
             }
           : undefined
       }
       onKeyPress={
-        startEditingField != null
+        startEditingField != null && kind !== 'read-only'
           ? e => {
               if (e.key === 'Enter') {
                 startEditingField();

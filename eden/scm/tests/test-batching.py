@@ -12,7 +12,7 @@ from hghave import require
 
 
 # equivalent of repo.repository
-class thing(object):
+class thing:
     def hello(self):
         return "Ready."
 
@@ -54,16 +54,16 @@ def use(it):
 
     # Future shouldn't be set until we submit().
     assert isinstance(foo, peer.future)
-    assert not util.safehasattr(foo, "value")
-    assert not util.safehasattr(bar, "value")
+    assert not hasattr(foo, "value")
+    assert not hasattr(bar, "value")
     batch.submit()
     # Call results() to obtain results as a generator.
     results = batch.results()
 
     # Future results shouldn't be set until we consume a value.
-    assert not util.safehasattr(foo, "value")
+    assert not hasattr(foo, "value")
     foovalue = next(results)
-    assert util.safehasattr(foo, "value")
+    assert hasattr(foo, "value")
     assert foovalue == foo.value
     print(foo.value)
     next(results)
@@ -126,7 +126,7 @@ def unescapearg(escaped):
 # server side
 
 # equivalent of wireproto's global functions
-class server(object):
+class server:
     def __init__(self, local):
         self.local = local
 

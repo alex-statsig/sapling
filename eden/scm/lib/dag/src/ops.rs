@@ -608,11 +608,18 @@ pub trait Open: Clone {
     fn open(&self) -> Result<Self::OpenTarget>;
 }
 
-/// Has an integer tuple version that can be used to test if the data was
-/// changed. If the first number changes, it means incompatible changes.
-/// If only the second number increases, it means append-only changes.
-pub trait IntVersion {
-    fn int_version(&self) -> (u64, u64);
+/// Has a tuple version that can be used to test if the data was changed.
+pub trait StorageVersion {
+    /// Version tracked by the underlying low-level storage (ex. indexedlog).
+    /// `(epoch, length)`.
+    /// - If `epoch` is changed, then a non-append-only change has happened,
+    ///   all caches should be invalidated.
+    /// - If `length` is increased but `epoch` has changed, then the storage
+    ///   layer got an append-only change. Note: the append-only change at
+    ///   the storage layer does *not* mean append-only at the commit graph
+    ///   layer, since the strip operation that removes commits could be
+    ///   implemented by appending special data to the storage layer.
+    fn storage_version(&self) -> (u64, u64);
 }
 
 /// Fallible clone.
@@ -637,6 +644,7 @@ impl<T: IdConvert + IdMapSnapshot> ToIdSet for T {
         // Fast path: extract IdSet from IdStaticSet.
         if let Some(set) = set.as_any().downcast_ref::<IdStaticSet>() {
             if None < version && version <= Some(self.map_version()) {
+                tracing::debug!(target: "dag::algo::to_id_set", "{:6?} (fast path)", set);
                 return Ok(set.spans.clone());
             }
         }
@@ -644,6 +652,7 @@ impl<T: IdConvert + IdMapSnapshot> ToIdSet for T {
         // Convert IdLazySet to IdStaticSet. Bypass hash lookups.
         if let Some(set) = set.as_any().downcast_ref::<IdLazySet>() {
             if None < version && version <= Some(self.map_version()) {
+                tracing::warn!(target: "dag::algo::to_id_set", "{:6?} (slow path 1)", set);
                 let set: IdStaticSet = set.to_static()?;
                 return Ok(set.spans);
             }
@@ -653,6 +662,7 @@ impl<T: IdConvert + IdMapSnapshot> ToIdSet for T {
         // IdSet. Does not bypass hash lookups.
         let mut spans = IdSet::empty();
         let mut iter = set.iter().await?.chunks(1 << 17);
+        tracing::warn!(target: "dag::algo::to_id_set", "{:6?} (slow path 2)", set);
         while let Some(names) = iter.next().await {
             let names = names.into_iter().collect::<Result<Vec<_>>>()?;
             let ids = self.vertex_id_batch(&names).await?;

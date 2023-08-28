@@ -16,7 +16,9 @@ use configmodel::ConfigExt;
 use io::IO;
 use manifest_tree::ReadTreeManifest;
 use parking_lot::Mutex;
+use pathmatcher::DynMatcher;
 use pathmatcher::Matcher;
+use repolock::RepoLocker;
 use storemodel::ReadFileContents;
 use treestate::filestate::StateFlags;
 use treestate::tree::VisitorResult;
@@ -27,10 +29,13 @@ use vfs::VFS;
 use crate::filechangedetector::FileChangeDetector;
 use crate::filechangedetector::FileChangeResult;
 use crate::filechangedetector::ResolvedFileChangeResult;
-use crate::filesystem::ChangeType;
-use crate::filesystem::PendingChangeResult;
+use crate::filesystem::PendingChange;
 use crate::filesystem::PendingChanges as PendingChangesTrait;
 use crate::metadata;
+use crate::metadata::Metadata;
+use crate::util::dirstate_write_time_override;
+use crate::util::maybe_flush_treestate;
+use crate::util::update_filestate_from_fs_meta;
 use crate::walker::WalkEntry;
 use crate::walker::Walker;
 use crate::workingcopy::WorkingCopy;
@@ -44,7 +49,7 @@ pub struct PhysicalFileSystem {
     tree_resolver: ArcReadTreeManifest,
     store: ArcReadFileContents,
     treestate: Arc<Mutex<TreeState>>,
-    include_directories: bool,
+    locker: Arc<RepoLocker>,
 }
 
 impl PhysicalFileSystem {
@@ -53,14 +58,14 @@ impl PhysicalFileSystem {
         tree_resolver: ArcReadTreeManifest,
         store: ArcReadFileContents,
         treestate: Arc<Mutex<TreeState>>,
-        include_directories: bool,
+        locker: Arc<RepoLocker>,
     ) -> Result<Self> {
         Ok(PhysicalFileSystem {
             vfs,
             tree_resolver,
             store,
             treestate,
-            include_directories,
+            locker,
         })
     }
 }
@@ -68,13 +73,14 @@ impl PhysicalFileSystem {
 impl PendingChangesTrait for PhysicalFileSystem {
     fn pending_changes(
         &self,
-        matcher: Arc<dyn Matcher + Send + Sync + 'static>,
-        _ignore_matcher: Arc<dyn Matcher + Send + Sync + 'static>,
+        matcher: DynMatcher,
+        ignore_matcher: DynMatcher,
         ignore_dirs: Vec<PathBuf>,
+        include_ignored: bool,
         last_write: SystemTime,
         config: &dyn Config,
         _io: &IO,
-    ) -> Result<Box<dyn Iterator<Item = Result<PendingChangeResult>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Result<PendingChange>>>> {
         let root = self.vfs.root().to_path_buf();
         let ident = identity::must_sniff_dir(&root)?;
         let walker = Walker::new(
@@ -96,13 +102,18 @@ impl PendingChangesTrait for PhysicalFileSystem {
         let pending_changes = PendingChanges {
             walker,
             matcher,
+            ignore_matcher,
+            include_ignored,
             treestate: self.treestate.clone(),
             stage: PendingChangesStage::Walk,
-            include_directories: self.include_directories,
             seen: HashSet::new(),
             tree_iter: None,
             lookup_iter: None,
             file_change_detector: Some(file_change_detector),
+            update_ts: Vec::new(),
+            locker: self.locker.clone(),
+            dirstate_write_time: dirstate_write_time_override(config),
+            vfs: self.vfs.clone(),
         };
         Ok(Box::new(pending_changes))
     }
@@ -111,13 +122,18 @@ impl PendingChangesTrait for PhysicalFileSystem {
 pub struct PendingChanges<M: Matcher + Clone + Send + Sync + 'static> {
     walker: Walker<M>,
     matcher: M,
+    ignore_matcher: M,
+    include_ignored: bool,
     treestate: Arc<Mutex<TreeState>>,
     stage: PendingChangesStage,
-    include_directories: bool,
     seen: HashSet<RepoPathBuf>,
-    tree_iter: Option<Box<dyn Iterator<Item = Result<PendingChangeResult>> + Send>>,
-    lookup_iter: Option<Box<dyn Iterator<Item = Result<PendingChangeResult>> + Send>>,
+    tree_iter: Option<Box<dyn Iterator<Item = Result<PendingChange>> + Send>>,
+    lookup_iter: Option<Box<dyn Iterator<Item = Result<ResolvedFileChangeResult>> + Send>>,
     file_change_detector: Option<FileChangeDetector>,
+    update_ts: Vec<(RepoPathBuf, Metadata)>,
+    locker: Arc<RepoLocker>,
+    dirstate_write_time: Option<i64>,
+    vfs: VFS,
 }
 
 #[derive(PartialEq)]
@@ -140,23 +156,39 @@ impl PendingChangesStage {
 }
 
 impl<M: Matcher + Clone + Send + Sync + 'static> PendingChanges<M> {
-    fn next_walk(&mut self) -> Result<Option<PendingChangeResult>> {
+    fn next_walk(&mut self) -> Result<Option<PendingChange>> {
         loop {
             match self.walker.next() {
                 Some(Ok(WalkEntry::File(mut path, metadata))) => {
+                    tracing::trace!(%path, "found file");
+
+                    if self.include_ignored && self.ignore_matcher.matches_file(&path)? {
+                        tracing::trace!(%path, "ignored");
+                        return Ok(Some(PendingChange::Ignored(path)));
+                    }
+
                     let mut ts = self.treestate.lock();
 
                     // On case insensitive systems, normalize the path so
                     // duplicate paths with different case can be detected in
                     // the seen set, but only if the dirstate entry hasn't been
                     // deleted.
-                    let (normalized, ts_state) = ts.normalize_path_and_get(path.as_ref())?;
-                    if normalized != path.as_byte_slice()
-                        && ts_state
+                    let (normalized, mut ts_state) = ts.normalize_path_and_get(path.as_ref())?;
+                    if normalized != path.as_byte_slice() {
+                        let normalized = RepoPathBuf::from_utf8(normalized.into_owned())?;
+
+                        if ts_state
                             .as_ref()
                             .map_or(false, |s| s.state.intersects(StateFlags::EXIST_NEXT))
-                    {
-                        path = RepoPathBuf::from_utf8(normalized.into_owned())?;
+                        {
+                            tracing::trace!(%path, %normalized, "normalizing path based in dirstate");
+                            path = normalized;
+                        } else {
+                            tracing::trace!(%path, %normalized, "not normalizing because !EXIST_NEXT");
+                            // We aren staying separate from normalized, so we mustn't use
+                            // it's tree state entry.
+                            ts_state = ts.get(&path)?.cloned();
+                        }
                     }
                     self.seen.insert(path.clone());
                     let changed = self
@@ -170,13 +202,11 @@ impl<M: Matcher + Clone + Send + Sync + 'static> PendingChanges<M> {
                         })?;
 
                     if let FileChangeResult::Yes(change_type) = changed {
-                        return Ok(Some(PendingChangeResult::File(change_type)));
+                        return Ok(Some(change_type));
                     }
                 }
-                Some(Ok(WalkEntry::Directory(dir))) => {
-                    if self.include_directories {
-                        return Ok(Some(PendingChangeResult::SeenDirectory(dir)));
-                    }
+                Some(Ok(WalkEntry::Directory(_))) => {
+                    // Shouldn't happen since we don't request directories.
                 }
                 Some(Err(e)) => {
                     return Err(e);
@@ -188,7 +218,7 @@ impl<M: Matcher + Clone + Send + Sync + 'static> PendingChanges<M> {
         }
     }
 
-    fn next_tree(&mut self) -> Option<Result<PendingChangeResult>> {
+    fn next_tree(&mut self) -> Option<Result<PendingChange>> {
         if self.tree_iter.is_none() {
             self.tree_iter = Some(Box::new(self.get_tree_entries().into_iter()));
         }
@@ -196,7 +226,7 @@ impl<M: Matcher + Clone + Send + Sync + 'static> PendingChanges<M> {
         self.tree_iter.as_mut().unwrap().next()
     }
 
-    fn get_tree_entries(&mut self) -> Vec<Result<PendingChangeResult>> {
+    fn get_tree_entries(&mut self) -> Vec<Result<PendingChange>> {
         let tracked = match self.get_tracked_from_p1() {
             Err(e) => return vec![Err(e)],
             Ok(tracked) => tracked,
@@ -206,34 +236,39 @@ impl<M: Matcher + Clone + Send + Sync + 'static> PendingChanges<M> {
         tracked
             .into_iter()
             .filter_map(|mut path| {
+                tracing::trace!(%path, "tree path");
+
                 let normalized = match ts.normalize_path(path.as_ref()) {
                     Ok(path) => path,
                     Err(e) => return Some(Err(e)),
                 };
                 if normalized != path.as_byte_slice() {
-                    path = match RepoPathBuf::from_utf8(normalized.into_owned()) {
+                    let normalized = match RepoPathBuf::from_utf8(normalized.into_owned()) {
                         Ok(path) => path,
                         Err(e) => return Some(Err(e.into())),
                     };
+                    tracing::trace!(%path, %normalized, "normalized tree path");
+                    path = normalized;
                 }
 
                 // Skip this path if we've seen it or it doesn't match the matcher.
                 if self.seen.contains(&path) {
-                    return None;
+                    tracing::trace!(%path, "tree path seen");
+                    None
                 } else {
                     match self.matcher.matches_file(&path) {
-                        Err(e) => {
-                            return Some(Err(e));
+                        Err(e) => Some(Err(e)),
+                        Ok(false) => {
+                            tracing::trace!(%path, "tree path doesn't match");
+                            None
                         }
-                        Ok(false) => return None,
-                        Ok(true) => {}
+                        // This path is EXIST_P1 but not on disk - emit deleted event.
+                        Ok(true) => {
+                            tracing::trace!(%path, "tree path deleted");
+                            Some(Ok(PendingChange::Deleted(path.to_owned())))
+                        }
                     }
                 }
-
-                // This path is EXIST_P1 but not on disk - emit deleted event.
-                Some(Ok(PendingChangeResult::File(ChangeType::Deleted(
-                    path.to_owned(),
-                ))))
             })
             .collect()
     }
@@ -260,29 +295,33 @@ impl<M: Matcher + Clone + Send + Sync + 'static> PendingChanges<M> {
         Ok(result)
     }
 
-    fn next_lookup(&mut self) -> Option<Result<PendingChangeResult>> {
-        self.lookup_iter
-            .get_or_insert_with(|| {
-                let iter = self
-                    .file_change_detector
-                    .take()
-                    .unwrap()
-                    .into_iter()
-                    .filter_map(|result| match result {
-                        Ok(ResolvedFileChangeResult::Yes(change_type)) => {
-                            Some(Ok(PendingChangeResult::File(change_type)))
-                        }
-                        Ok(ResolvedFileChangeResult::No(_)) => None,
-                        Err(e) => Some(Err(e)),
-                    });
-                Box::new(iter)
-            })
-            .next()
+    fn next_lookup(&mut self) -> Option<Result<PendingChange>> {
+        loop {
+            let next = self
+                .lookup_iter
+                .get_or_insert_with(|| {
+                    Box::new(self.file_change_detector.take().unwrap().into_iter())
+                })
+                .next()?;
+
+            match next {
+                Ok(ResolvedFileChangeResult::Yes(change_type)) => {
+                    return Some(Ok(change_type));
+                }
+                Ok(ResolvedFileChangeResult::No((path, fs_meta))) => {
+                    if let Some(fs_meta) = fs_meta {
+                        self.update_ts.push((path, fs_meta));
+                    }
+                    continue;
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
     }
 }
 
 impl<M: Matcher + Clone + Send + Sync + 'static> Iterator for PendingChanges<M> {
-    type Item = Result<PendingChangeResult>;
+    type Item = Result<PendingChange>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // TODO: Try to make this into a chain instead of a manual state machine
@@ -300,8 +339,51 @@ impl<M: Matcher + Clone + Send + Sync + 'static> Iterator for PendingChanges<M> 
 
             self.stage = self.stage.next();
             if self.stage == PendingChangesStage::Finished {
+                if let Err(err) = self.update_treestate_mtimes() {
+                    return Some(Err(err));
+                }
+
                 return None;
             }
         }
+    }
+}
+
+impl<M: Matcher + Clone + Send + Sync + 'static> PendingChanges<M> {
+    fn update_treestate_mtimes(&mut self) -> Result<()> {
+        let mut ts = self.treestate.lock();
+        let was_dirty = ts.dirty();
+
+        // If file came back clean, update dirstate entry with current mtime and/or size.
+        for (path, fs_meta) in self.update_ts.drain(..) {
+            if let Some(state) = ts.get(&path)? {
+                tracing::trace!(%path, "updating treestate metadata");
+
+                let mut state = state.clone();
+
+                // We don't set NEED_CHECK since we check all files every time.
+                // However, unset it anyway in case someone else set it
+                // (otherwise files get stuck NEED_CHECK).
+                state.state -= StateFlags::NEED_CHECK;
+
+                update_filestate_from_fs_meta(&mut state, &fs_meta);
+                ts.insert(&path, &state)?;
+            }
+        }
+
+        // Don't flush treestate if it was already dirty. If we are inside a
+        // Python transaction with uncommitted, substantial dirstate changes,
+        // those changes should not be written out until the transaction
+        // finishes.
+        if !was_dirty {
+            maybe_flush_treestate(
+                self.vfs.root(),
+                &mut ts,
+                &self.locker,
+                self.dirstate_write_time.clone(),
+            )?;
+        }
+
+        Ok(())
     }
 }

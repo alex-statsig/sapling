@@ -48,15 +48,19 @@ py_class!(pub class identity |py| {
         Ok(self.ident(py).config_repo_file().to_string())
     }
 
+    def userconfigpath(&self) -> PyResult<Option<PyPathBuf>> {
+        match self.ident(py).user_config_path() {
+            Some(p) => Ok(Some(p.as_path().try_into().map_pyerr(py)?)),
+            None => Ok(None)
+        }
+    }
+
     def userconfigpaths(&self) -> PyResult<Vec<PyPathBuf>> {
         self.ident(py).user_config_paths().iter().map(|p| p.as_path().try_into()).collect::<Result<Vec<PyPathBuf>>>().map_pyerr(py)
     }
 
-    def systemconfigpath(&self) -> PyResult<Option<PyPathBuf>> {
-        match self.ident(py).system_config_path() {
-            None => Ok(None),
-            Some(p) => p.try_into().map(|p| Some(p)).map_pyerr(py),
-        }
+    def systemconfigpaths(&self) -> PyResult<Vec<PyPathBuf>> {
+        self.ident(py).system_config_paths().iter().map(|p| p.as_path().try_into()).collect::<Result<Vec<PyPathBuf>>>().map_pyerr(py)
     }
 
     def productname(&self) -> PyResult<String> {

@@ -62,7 +62,7 @@ def _unpackmetadata(data):
     return dict(entry.split("=", 1) for entry in data.split("\0") if "=" in entry)
 
 
-class treestatemap(object):
+class treestatemap:
     """a drop-in replacement for dirstate._map, with more abilities like also
     track fsmonitor state.
 
@@ -86,7 +86,7 @@ class treestatemap(object):
         if importdirstate:
             # Import from an old dirstate
             self.clear()
-            self._parents = importdirstate.parents()
+            self.setparents(importdirstate.parents())
             self._tree.importmap(importdirstate._map)
             # Import copymap
             copymap = importdirstate.copies()
@@ -111,7 +111,7 @@ class treestatemap(object):
 
     def clear(self):
         self._threshold = 0
-        self._parents = (node.nullid, node.nullid)
+        self.setparents(node.nullid, node.nullid)
 
         # use a new file
         self._rootid = self._tree.reset(self._vfs.join("treestate"))
@@ -132,6 +132,13 @@ class treestatemap(object):
         if entry is None or len(entry) != 5:
             return default
         flags, mode, size, mtime, _copied = entry
+
+        # Python depends on size=-2 to infer P2 activity. Treestate
+        # tracks P2 separate from size, so the size could be set to a
+        # value other than -2.
+        if flags & treestate.EXIST_P2:
+            size = -2
+
         # convert flags to Mercurial dirstate state
         state = treestate.tohgstate(flags)
         return (state, mode, size, mtime)
@@ -288,6 +295,14 @@ class treestatemap(object):
     def setparents(self, p1, p2):
         self._parents = (p1, p2)
 
+        metadata = self.getmetadata()
+        metadata.update({"p1": None, "p2": None})
+        if self._parents[0] != node.nullid:
+            metadata["p1"] = node.hex(self._parents[0])
+        if self._parents[1] != node.nullid:
+            metadata["p2"] = node.hex(self._parents[1])
+        self._tree.setmetadata(_packmetadata(metadata))
+
     def _parsedirstate(content):
         """Parse given dirstate metadata file"""
         f = util.stringio(content)
@@ -403,13 +418,6 @@ class treestatemap(object):
 
     def write(self, st, now):
         # write .hg/treestate/<uuid>
-        metadata = self.getmetadata()
-        metadata.update({"p1": None, "p2": None})
-        if self._parents[0] != node.nullid:
-            metadata["p1"] = node.hex(self._parents[0])
-        if self._parents[1] != node.nullid:
-            metadata["p2"] = node.hex(self._parents[1])
-        self._tree.setmetadata(_packmetadata(metadata))
         self._tree.invalidatemtime(now)
 
         self._vfs.makedirs("treestate")

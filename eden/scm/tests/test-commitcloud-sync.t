@@ -1,7 +1,5 @@
-#chg-compatible
 #debugruntest-compatible
 #inprocess-hg-incompatible
-  $ setconfig workingcopy.ruststatus=False
   $ setconfig experimental.allowfilepeer=True
 
   $ configure dummyssh mutation-norecord

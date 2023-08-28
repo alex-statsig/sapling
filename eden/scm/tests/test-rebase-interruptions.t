@@ -1,6 +1,4 @@
 #chg-compatible
-  $ setconfig workingcopy.ruststatus=False
-  $ setconfig status.use-rust=False workingcopy.use-rust=False
   $ setconfig experimental.allowfilepeer=True
 
   $ enable rebase remotenames
@@ -33,7 +31,7 @@
 
 Changes during an interruption - continue:
 
-  $ hg clone -q -u . a a1
+  $ hg clone -q a a1
   $ cd a1
 
   $ tglog
@@ -124,7 +122,7 @@ Solve the conflict and go on:
 
 Changes during an interruption - abort:
 
-  $ hg clone -q -u . a a2
+  $ hg clone -q a a2
   $ cd a2
 
   $ tglog
@@ -196,7 +194,7 @@ Abort the rebasing:
 
 Changes during an interruption - abort (again):
 
-  $ hg clone -q -u . a a3
+  $ hg clone -q a a3
   $ cd a3
 
   $ tglogp
@@ -338,7 +336,7 @@ Make sure merge state is cleaned up after a no-op rebase merge (issue5494)
   continue: hg rebase --continue
   $ hg rebase --continue
   rebasing fdaca8533b86 "b"
-  note: rebase of fdaca8533b86 created no changes to commit
+  note: not rebasing fdaca8533b86, its destination (rebasing onto) commit already has all its changes
   $ hg resolve --list
   $ test -f .hg/merge
   [1]

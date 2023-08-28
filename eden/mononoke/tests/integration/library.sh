@@ -422,6 +422,13 @@ function mononoke_testtool {
     --mononoke-config-path "$TESTTMP"/mononoke-config "$@"
 }
 
+function mononoke_backfill_bonsai_blob_mapping {
+  GLOG_minloglevel=5 "$MONONOKE_BACKFILL_BONSAI_BLOB_MAPPING" \
+    "${CACHE_ARGS[@]}" \
+    "${COMMON_ARGS[@]}" \
+    --mononoke-config-path "$TESTTMP"/mononoke-config "$@"
+}
+
 function mononoke_admin_source_target {
   local source_repo_id=$1
   shift
@@ -1356,12 +1363,13 @@ function wait_for_scs {
 # Because of warm bookmark cache the SCS bookmark updates are async.
 # This function allows to wait for them.
 function wait_for_bookmark_update() {
-  local repo=$1
-  local bookmark=$2
-  local target=$3
+  local repo="$1"
+  local bookmark="$2"
+  local target="$3"
+  local scheme="${4:-hg}"
   local attempt=1
   sleep 2
-  while [[ "$(scsc lookup -R $repo -B $bookmark)" != "$target" ]]
+  while [[ "$(scsc lookup -S "$scheme" -R "$repo" -B "$bookmark")" != "$target" ]]
   do
     attempt=$((attempt + 1))
     if [[ $attempt -gt 5 ]]
@@ -1644,7 +1652,6 @@ remotefilelog=
 remotenames=
 smartlog=
 clienttelemetry=
-lz4revlog=
 [treemanifest]
 flatcompat=False
 sendtrees=True
@@ -1657,7 +1664,7 @@ EOF
 }
 
 function hgmn_clone() {
-  quiet hgmn clone --shallow  --config remotefilelog.reponame="$REPONAME" "$@" --config extensions.treemanifest= --config treemanifest.treeonly=True --config extensions.lz4revlog= && \
+  quiet hgmn clone --shallow  --config remotefilelog.reponame="$REPONAME" "$@" --config extensions.treemanifest= --config treemanifest.treeonly=True && \
   cat >> "$2"/.hg/hgrc <<EOF
 [extensions]
 treemanifest=
@@ -1665,7 +1672,6 @@ remotefilelog=
 remotenames=
 smartlog=
 clienttelemetry=
-lz4revlog=
 [treemanifest]
 flatcompat=False
 sendtrees=True
@@ -1919,15 +1925,6 @@ CONFIG
 
 }
 
-function get_bonsai_bookmark() {
-  local bookmark repoid_backup
-  repoid_backup="$REPOID"
-  export REPOID="$1"
-  bookmark="$2"
-  mononoke_admin bookmarks get -c bonsai "$bookmark" 2>/dev/null | cut -d' ' -f2
-  export REPOID="$repoid_backup"
-}
-
 function add_synced_commit_mapping_entry() {
   local small_repo_id large_repo_id small_bcs_id large_bcs_id version
   small_repo_id="$1"
@@ -1938,6 +1935,15 @@ function add_synced_commit_mapping_entry() {
   quiet mononoke_admin_source_target "$small_repo_id" "$large_repo_id" crossrepo insert rewritten --source-hash "$small_bcs_id" \
     --target-hash "$large_bcs_id" \
     --version-name "$version"
+}
+
+function crossrepo_verify_bookmarks() {
+  local small_repo_id large_repo_id
+  small_repo_id="$1"
+  shift
+  large_repo_id="$1"
+  shift
+  mononoke_admin_source_target "$small_repo_id" "$large_repo_id" crossrepo verify-bookmarks "$@"
 }
 
 function read_blobstore_wal_queue_size() {
@@ -2277,7 +2283,6 @@ function packer() {
   "$MONONOKE_PACKER" \
     "${CACHE_ARGS[@]}" \
     "${COMMON_ARGS[@]}" \
-    --repo-id "$REPOID" \
     --mononoke-config-path "${TESTTMP}/mononoke-config" \
     "$@"
 }

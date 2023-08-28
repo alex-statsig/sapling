@@ -292,6 +292,7 @@ def callcatch(ui, req, func):
         error.ConfigError,
         error.InvalidRepoPath,
         error.NonUTF8PathError,
+        error.PathMatcherError,
         error.RepoInitError,
         error.WorkingCopyError,
     ) as inst:
@@ -304,9 +305,9 @@ def callcatch(ui, req, func):
         elif m in "zlib".split():
             ui.warn(_("(is your Python install correct?)\n"))
     except IOError as inst:
-        if util.safehasattr(inst, "code"):
+        if hasattr(inst, "code"):
             ui.warn(_("%s\n") % inst, error=_("abort"))
-        elif util.safehasattr(inst, "reason"):
+        elif hasattr(inst, "reason"):
             try:  # usually it is in the form (errno, strerror)
                 reason = inst.reason.args[1]
             except (AttributeError, IndexError):
@@ -316,9 +317,7 @@ def callcatch(ui, req, func):
                 # SSLError of Python 2.7.9 contains a unicode
                 reason = encoding.unitolocal(reason)
             ui.warn(_("error: %s\n") % reason, error=_("abort"))
-        elif (
-            util.safehasattr(inst, "args") and inst.args and inst.args[0] == errno.EPIPE
-        ):
+        elif hasattr(inst, "args") and inst.args and inst.args[0] == errno.EPIPE:
             pass
         elif getattr(inst, "strerror", None):
             filename = getattr(inst, "filename", None)
@@ -447,7 +446,7 @@ def checkportabilityalert(ui):
     return abort, warn
 
 
-class casecollisionauditor(object):
+class casecollisionauditor:
     def __init__(self, ui, abort, dirstate):
         self._ui = ui
         self._abort = abort
@@ -655,7 +654,6 @@ def matchandpats(
     globbed=False,
     default="relpath",
     badfn=None,
-    emptyalways=True,
 ):
     """Return a matcher and the patterns that were used.
     The matcher will warn about bad matches, unless an alternate badfn callback
@@ -679,7 +677,6 @@ def matchandpats(
         opts.get("exclude"),
         default,
         badfn=badfn,
-        emptyalways=emptyalways,
         warn=ctx.repo().ui.warn,
     )
 
@@ -695,12 +692,9 @@ def match(
     globbed=False,
     default="relpath",
     badfn=None,
-    emptyalways=True,
 ):
     """Return a matcher that will warn about bad matches."""
-    m = matchandpats(
-        ctx, pats, opts, globbed, default, badfn=badfn, emptyalways=emptyalways
-    )[0]
+    m = matchandpats(ctx, pats, opts, globbed, default, badfn=badfn)[0]
 
     # Test some rare dirs that probably wouldn't match unless the
     # matcher matches everything. Test for "visitdir is True" which
@@ -779,7 +773,7 @@ def origpath(ui, repo, filepath):
     return origvfs.join(filepathfromroot)
 
 
-class _containsnode(object):
+class _containsnode:
     """proxy __contains__(node) to container.__contains__ which accepts revs"""
 
     def __init__(self, repo, revcontainer):
@@ -813,7 +807,7 @@ def cleanupnodes(repo, replacements, operation, moves=None, metadata=None):
         return {}
 
     # translate mapping's other forms
-    if not util.safehasattr(replacements, "items"):
+    if not hasattr(replacements, "items"):
         replacements = {n: () for n in replacements}
 
     # Calculate bookmark movements
@@ -1100,7 +1094,7 @@ def writerequires(opener, requirements):
     opener.writeutf8("requires", content)
 
 
-class filecachesubentry(object):
+class filecachesubentry:
     def __init__(self, path, stat):
         self.path = path
         self.cachestat = None
@@ -1128,7 +1122,7 @@ class filecachesubentry(object):
         return util.cachestat(path)
 
 
-class filecacheentry(object):
+class filecacheentry:
     def __init__(self, paths, stat=True):
         self._entries = []
         for path in paths:
@@ -1146,7 +1140,7 @@ class filecacheentry(object):
             entry.refresh()
 
 
-class filecache(object):
+class filecache:
     """A property like decorator that tracks files under .hg/ for updates.
 
     Records stat info when called in _filecache.
@@ -1229,6 +1223,71 @@ class filecache(object):
             raise AttributeError(self.name)
 
 
+class keyedcache:
+    """
+    Property cache based on key. Changing the key invalidates the cache.
+
+    Example:
+
+        >>> class Object1:
+        ...     count = 0
+        ...     def __init__(self):
+        ...         self.key = 1
+        ...     @keyedcache(lambda o: o.key)
+        ...     def next(self):
+        ...         Object1.count += 1
+        ...         return Object1.count
+        >>> o = Object1()
+        >>> o.next
+        1
+        >>> o.next # cached
+        1
+        >>> o.key = 2 # invalidate cache
+        >>> o.next # new value
+        2
+
+    """
+
+    NOT_SET = object()
+
+    def __init__(self, key):
+        """key: function to obtain 'key' from 'self'."""
+        self.key_function = key
+        self.nothing = object()
+        self.current_key = self.NOT_SET
+
+    def __call__(self, func):
+        # apply the decorator
+        assert callable(func)
+        self.func = func
+        self.name = func.__name__
+        return self
+
+    def __get__(self, obj, objtype=None):
+        # class property access
+        if obj is None:
+            return self
+        # property get
+        new_key = self.key_function(obj)
+        changed = self.current_key is self.NOT_SET or new_key != self.current_key
+        if changed:
+            # invalidate property cache on key change
+            obj.__dict__.pop(self.name, None)
+            self.current_key = new_key
+        if self.name not in obj.__dict__:
+            # populate cache
+            obj.__dict__[self.name] = self.func(obj)
+        return obj.__dict__[self.name]
+
+    # does not support __set__
+
+    def __delete__(self, obj):
+        try:
+            del obj.__dict__[self.name]
+        except KeyError:
+            raise AttributeError(self.name)
+
+
 def gdinitconfig(ui):
     """helper function to know if a repo should be created as general delta"""
     # experimental config: format.generaldelta
@@ -1243,7 +1302,7 @@ def gddeltaconfig(ui):
     return ui.configbool("format", "generaldelta")
 
 
-class simplekeyvaluefile(object):
+class simplekeyvaluefile:
     """A simple file with key=value lines
 
     Keys must be alphanumerics and start with a letter, values must not

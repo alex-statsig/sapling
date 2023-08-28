@@ -47,6 +47,7 @@
 #include "eden/fs/store/DiffCallback.h"
 #include "eden/fs/store/DiffContext.h"
 #include "eden/fs/store/ObjectStore.h"
+#include "eden/fs/telemetry/LogEvent.h"
 #include "eden/fs/telemetry/Tracing.h"
 #include "eden/fs/utils/Bug.h"
 #include "eden/fs/utils/CaseSensitivity.h"
@@ -196,7 +197,23 @@ ImmediateFuture<struct stat> TreeInode::stat(
   auto contents = contents_.rlock();
 
 #ifndef _WIN32
-  getMetadataLocked(contents->entries).applyToStat(st);
+  auto metadata = getMetadataLocked(contents->entries);
+  metadata.applyToStat(st);
+  if (UNLIKELY(S_ISREG(st.st_mode))) {
+    // TODO(T159626416): Log the path of the tree that is being misinterpreted
+    // as a regular file. We should only do this if these events are infrequent.
+    getMount()->getServerState()->getStructuredLogger()->logEvent(
+        InodeMetadataMismatch{
+            st.st_mode,
+            st.st_ino,
+            metadata.gid,
+            metadata.uid,
+            metadata.timestamps.atime.asRawRepresentation(),
+            metadata.timestamps.ctime.asRawRepresentation(),
+            metadata.timestamps.mtime.asRawRepresentation(),
+        });
+  }
+
 #endif
 
   // For directories, nlink is the number of entries including the
@@ -1057,7 +1074,10 @@ DirContents TreeInode::saveDirFromTree(
     EdenMount* mount) {
   auto overlay = mount->getOverlay();
   auto dir = buildDirFromTree(
-      tree, overlay, mount->getCheckoutConfig()->getCaseSensitive());
+      tree,
+      overlay,
+      mount->getCheckoutConfig()->getCaseSensitive(),
+      mount->getCheckoutConfig()->getEnableWindowsSymlinks());
   // buildDirFromTree just allocated inode numbers; they should be saved.
   overlay->saveOverlayDir(inodeNumber, dir);
   return dir;
@@ -1066,7 +1086,8 @@ DirContents TreeInode::saveDirFromTree(
 DirContents TreeInode::buildDirFromTree(
     const Tree* tree,
     Overlay* overlay,
-    CaseSensitivity caseSensitive) {
+    CaseSensitivity caseSensitive,
+    bool windowsSymlinksEnabled) {
   XCHECK(tree);
 
   // A future optimization is for this code to allocate all of the inode numbers
@@ -1079,7 +1100,8 @@ DirContents TreeInode::buildDirFromTree(
   for (const auto& treeEntry : *tree) {
     dir.emplace(
         treeEntry.first,
-        modeFromTreeEntryType(treeEntry.second.getType()),
+        modeFromTreeEntryType(filteredEntryType(
+            treeEntry.second.getType(), windowsSymlinksEnabled)),
         overlay->allocateInodeNumber(),
         treeEntry.second.getHash());
   }
@@ -1211,9 +1233,6 @@ FileInodePtr TreeInode::symlink(
     PathComponentPiece name,
     folly::StringPiece symlinkTarget,
     InvalidationRequired invalidate) {
-#ifndef _WIN32
-  // Eden doesn't support symlinks on Windows
-
   // symlink creates a newly materialized file in createImpl. We count this as
   // an inode materialization event to publish to TraceBus, which we begin
   // timing here before the parent tree inode materializes
@@ -1234,12 +1253,6 @@ FileInodePtr TreeInode::symlink(
         invalidate,
         startTime);
   }
-#else
-  (void)name;
-  (void)symlinkTarget;
-  (void)invalidate;
-  NOT_IMPLEMENTED();
-#endif
 }
 
 FileInodePtr TreeInode::mknod(
@@ -2618,6 +2631,7 @@ ImmediateFuture<Unit> TreeInode::computeDiff(
 
   std::vector<std::unique_ptr<DeferredDiffEntry>> deferredEntries;
   auto self = inodePtrFromThis();
+  bool windowsSymlinksEnabled = context->getWindowsSymlinksEnabled();
 
   // Grab the contents_ lock, and loop to find children that might be
   // different.  In this first pass we primarily build the list of children to
@@ -2658,10 +2672,14 @@ ImmediateFuture<Unit> TreeInode::computeDiff(
 
       if (!entryIgnored) {
         XLOG(DBG8) << "diff: untracked file: " << entryPath;
-        context->callback->addedPath(entryPath, inodeEntry->getDtype());
+        context->callback->addedPath(
+            entryPath,
+            filteredEntryDtype(inodeEntry->getDtype(), windowsSymlinksEnabled));
       } else if (context->listIgnored) {
         XLOG(DBG9) << "diff: ignored file: " << entryPath;
-        context->callback->ignoredPath(entryPath, inodeEntry->getDtype());
+        context->callback->ignoredPath(
+            entryPath,
+            filteredEntryDtype(inodeEntry->getDtype(), windowsSymlinksEnabled));
       } else {
         // Don't bother reporting this ignored file since
         // listIgnored is false.
@@ -2714,7 +2732,9 @@ ImmediateFuture<Unit> TreeInode::computeDiff(
     auto processRemoved = [&](const Tree::value_type& scmEntry) {
       XLOG(DBG5) << "diff: removed file: " << currentPath + scmEntry.first;
       context->callback->removedPath(
-          currentPath + scmEntry.first, scmEntry.second.getDtype());
+          currentPath + scmEntry.first,
+          filteredEntryDtype(
+              scmEntry.second.getDtype(), windowsSymlinksEnabled));
       if (scmEntry.second.isTree()) {
         deferredEntries.emplace_back(DeferredDiffEntry::createRemovedScmEntry(
             context, currentPath + scmEntry.first, scmEntry.second.getHash()));
@@ -2788,7 +2808,8 @@ ImmediateFuture<Unit> TreeInode::computeDiff(
               // source-control-visible metadata changes will cause the inode to
               // be materialized, and the previous path will be taken.
               treeEntryTypeFromMode(inodeEntry->getInitialMode()) ==
-                  scmEntry.getType() &&
+                  filteredEntryType(
+                      scmEntry.getType(), windowsSymlinksEnabled) &&
               getObjectStore().areObjectsKnownIdentical(
                   inodeEntry->getHash(), scmEntry.getHash())) {
             exactMatch = true;
@@ -2823,13 +2844,21 @@ ImmediateFuture<Unit> TreeInode::computeDiff(
           if (entryIgnored) {
             if (context->listIgnored) {
               XLOG(DBG6) << "diff: directory --> ignored file: " << entryPath;
-              context->callback->ignoredPath(entryPath, inodeEntry->getDtype());
+              context->callback->ignoredPath(
+                  entryPath,
+                  filteredEntryDtype(
+                      inodeEntry->getDtype(), windowsSymlinksEnabled));
             }
           } else {
             XLOG(DBG6) << "diff: directory --> untracked file: " << entryPath;
-            context->callback->addedPath(entryPath, inodeEntry->getDtype());
+            context->callback->addedPath(
+                entryPath,
+                filteredEntryDtype(
+                    inodeEntry->getDtype(), windowsSymlinksEnabled));
           }
-          context->callback->removedPath(entryPath, scmEntry.getDtype());
+          context->callback->removedPath(
+              entryPath,
+              filteredEntryDtype(scmEntry.getDtype(), windowsSymlinksEnabled));
           deferredEntries.emplace_back(DeferredDiffEntry::createRemovedScmEntry(
               context, entryPath, scmEntry.getHash()));
         } else {
@@ -2847,11 +2876,14 @@ ImmediateFuture<Unit> TreeInode::computeDiff(
           // janky hashing scheme for mercurial data, we should be able just
           // immediately assume the file is different here, without checking.
           if (treeEntryTypeFromMode(inodeEntry->getInitialMode()) !=
-              scmEntry.getType()) {
+              filteredEntryType(scmEntry.getType(), windowsSymlinksEnabled)) {
             // The mode is definitely modified
             XLOG(DBG5) << "diff: file modified due to mode change: "
                        << entryPath;
-            context->callback->modifiedPath(entryPath, inodeEntry->getDtype());
+            context->callback->modifiedPath(
+                entryPath,
+                filteredEntryDtype(
+                    inodeEntry->getDtype(), windowsSymlinksEnabled));
           } else {
             // TODO: Hopefully at some point we will track file sizes in the
             // parent TreeInode::Entry and the TreeEntry.  Once we have file
@@ -2862,7 +2894,8 @@ ImmediateFuture<Unit> TreeInode::computeDiff(
                 entryPath,
                 scmEntry,
                 inodeEntry->getHash(),
-                inodeEntry->getDtype()));
+                filteredEntryDtype(
+                    inodeEntry->getDtype(), windowsSymlinksEnabled)));
           }
         }
       }
@@ -3296,6 +3329,8 @@ unique_ptr<CheckoutAction> TreeInode::processCheckoutEntry(
   // At most one of oldScmEntry and newScmEntry may be null.
   XDCHECK(oldScmEntry || newScmEntry);
 
+  bool windowsSymlinksEnabled = ctx->getWindowsSymlinksEnabled();
+
   // If we aren't doing a force checkout, we don't need to do anything
   // for entries that are identical between the old and new source control
   // trees.
@@ -3304,7 +3339,12 @@ unique_ptr<CheckoutAction> TreeInode::processCheckoutEntry(
   // revert them to the desired state if they were modified in the local
   // filesystem.
   if (!ctx->forceUpdate() && oldScmEntry && newScmEntry &&
-      oldScmEntry->second.getType() == newScmEntry->second.getType() &&
+      // TODO: This is technically incorrect for files that go from SYMLINK to
+      // REGULAR (or vice versa).
+      filteredEntryType(
+          oldScmEntry->second.getType(), windowsSymlinksEnabled) ==
+          filteredEntryType(
+              newScmEntry->second.getType(), windowsSymlinksEnabled) &&
       getObjectStore().areObjectsKnownIdentical(
           oldScmEntry->second.getHash(), newScmEntry->second.getHash())) {
     // TODO: Should we perhaps fall through anyway to report conflicts for
@@ -3354,7 +3394,8 @@ unique_ptr<CheckoutAction> TreeInode::processCheckoutEntry(
       if (success.hasValue()) {
         auto [it, inserted] = contents.emplace(
             newScmEntry->first,
-            modeFromTreeEntryType(newScmEntry->second.getType()),
+            modeFromTreeEntryType(filteredEntryType(
+                newScmEntry->second.getType(), windowsSymlinksEnabled)),
             getOverlay()->allocateInodeNumber(),
             newScmEntry->second.getHash());
         XDCHECK(inserted);
@@ -3425,8 +3466,15 @@ unique_ptr<CheckoutAction> TreeInode::processCheckoutEntry(
       newScmEntry &&
       getObjectStore().areObjectsKnownIdentical(
           entry.getHash(), newScmEntry->second.getHash())) {
-    // The inode already matches the checkout destination. So do nothing.
-    return nullptr;
+    if (filteredEntryType(
+            oldScmEntry->second.getType(), windowsSymlinksEnabled) ==
+        filteredEntryType(
+            newScmEntry->second.getType(), windowsSymlinksEnabled)) {
+      // The inode already matches the checkout destination. So do nothing.
+      return nullptr;
+    }
+    // The types don't match, so we should fall through and update the
+    // entry. An example is when a file goes from REGULAR -> EXECUTABLE.
   } else {
     switch (getObjectStore().compareObjectsById(
         entry.getHash(), oldScmEntry->second.getHash())) {
@@ -3512,7 +3560,8 @@ unique_ptr<CheckoutAction> TreeInode::processCheckoutEntry(
   if (newScmEntry) {
     contents.emplace(
         newScmEntry->first,
-        modeFromTreeEntryType(newScmEntry->second.getType()),
+        modeFromTreeEntryType(filteredEntryType(
+            newScmEntry->second.getType(), windowsSymlinksEnabled)),
         getOverlay()->allocateInodeNumber(),
         newScmEntry->second.getHash());
   }
@@ -3556,6 +3605,7 @@ Future<InvalidationRequired> TreeInode::checkoutUpdateEntry(
     std::shared_ptr<const Tree> newTree,
     const std::optional<Tree::value_type>& newScmEntry) {
   auto treeInode = inode.asTreePtrOrNull();
+  bool windowsSymlinksEnabled = ctx->getWindowsSymlinksEnabled();
   if (!treeInode) {
     // If the target of the update is not a directory, then we know we do not
     // need to recurse into it, looking for more conflicts, so we can exit here.
@@ -3615,7 +3665,8 @@ Future<InvalidationRequired> TreeInode::checkoutUpdateEntry(
       if (newScmEntry) {
         auto [it, inserted] = contents->entries.emplace(
             newScmEntry->first,
-            modeFromTreeEntryType(newScmEntry->second.getType()),
+            modeFromTreeEntryType(filteredEntryType(
+                newScmEntry->second.getType(), windowsSymlinksEnabled)),
             getOverlay()->allocateInodeNumber(),
             newScmEntry->second.getHash());
         XDCHECK(inserted);
@@ -3665,6 +3716,7 @@ Future<InvalidationRequired> TreeInode::checkoutUpdateEntry(
            newTree = std::move(newTree),
            parentInode = inodePtrFromThis(),
            treeInode,
+           windowsSymlinksEnabled,
            newScmEntry](auto&&) mutable -> folly::Future<InvalidationRequired> {
             if (ctx->isDryRun()) {
               // If this is a dry run, simply report conflicts and don't update
@@ -3755,7 +3807,8 @@ Future<InvalidationRequired> TreeInode::checkoutUpdateEntry(
               auto contents = parentInode->contents_.wlock();
               auto ret = contents->entries.emplace(
                   newScmEntry->first,
-                  modeFromTreeEntryType(newScmEntry->second.getType()),
+                  modeFromTreeEntryType(filteredEntryType(
+                      newScmEntry->second.getType(), windowsSymlinksEnabled)),
                   parentInode->getOverlay()->allocateInodeNumber(),
                   newScmEntry->second.getHash());
               inserted = ret.second;

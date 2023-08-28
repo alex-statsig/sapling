@@ -1,3 +1,4 @@
+#debugruntest-compatible
 #require icasefs
 
   $ configure modernclient
@@ -7,9 +8,10 @@
 test file addition with bad case
 
   $ setconfig devel.segmented-changelog-rev-compat=True
-  $ newclientrepo repo1
+  $ newclientrepo
   $ echo a > a
   $ hg add A
+  adding a
   $ hg st
   A a
   $ hg ci -m adda
@@ -19,7 +21,7 @@ test file addition with bad case
 
 test case collision on rename (issue750)
 
-  $ newclientrepo repo2
+  $ newclientrepo
   $ echo a > a
   $ hg --debug ci -Am adda
   adding a
@@ -73,12 +75,14 @@ test changing case of path components
   A D/c (fsmonitor !)
   $ hg ci -m addc "glob:**/c"
   $ hg mv d/b d/e
+  moving D/b to D/e
   $ hg st
   A D/e
   R D/b
   $ hg revert -aq
   $ rm d/e
   $ hg mv d/b D/B
+  moving D/b to D/B
   $ hg st
   A D/B
   R D/b
@@ -86,7 +90,7 @@ test changing case of path components
 
 test case collision between revisions (issue912)
 
-  $ newclientrepo repo3
+  $ newclientrepo
   $ echo a > a
   $ hg ci -Am adda
   adding a
@@ -127,7 +131,7 @@ no clobbering of untracked files with wrong casing
 
 issue 3342: file in nested directory causes unexpected abort
 
-  $ newclientrepo issue3342
+  $ newclientrepo
 
   $ mkdir -p a/B/c/D
   $ echo e > a/B/c/D/e
@@ -142,10 +146,20 @@ issue 4481: revert across case only renames
   $ hg revert --all -r .~2
   removing a/B/c/D/E
   adding a/B/c/D/e
-  $ find * | sort
+  $ find . | sort
   a
   a/B
   a/B/c
   a/B/c/D
   a/B/c/D/e
   a/B/c/D/e.orig
+
+Make sure we can keep removed and untracked file separate.
+  $ newclientrepo
+  $ touch foo
+  $ hg commit -Aqm a
+  $ hg rm foo
+  $ touch FOO
+  $ hg st
+  R foo
+  ? FOO

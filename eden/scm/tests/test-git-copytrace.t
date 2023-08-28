@@ -7,7 +7,6 @@
   $ enable rebase copytrace
 
   $ setupconfig() {
-  >   setconfig copytrace.fastcopytrace=True
   >   setconfig copytrace.dagcopytrace=True
   > }
 
@@ -34,6 +33,8 @@ Test copytrace
   > 4
   > EOF
   $ hg ci -q -Am 'mv a -> b'
+  $ hg log -T '{node|short}\n' -r .
+  fb4ff23de3ea
 
 Default similarity threshold 0.8 should work
 
@@ -42,11 +43,11 @@ Default similarity threshold 0.8 should work
 
 High similarity threshold should fail to find the rename
   $ hg debugcopytrace -s .~1 -d . a --config copytrace.similarity-threshold=0.91
-  {"a": null}
+  {"a": "the missing file was deleted by commit fb4ff23de3ea in the branch rebasing onto"}
 
 Low max rename edit cost should fail to find the rename
   $ hg debugcopytrace -s .~1 -d . a --config copytrace.max-edit-cost=0
-  {"a": null}
+  {"a": "the missing file was deleted by commit fb4ff23de3ea in the branch rebasing onto"}
 
 Test missing files in source side
 

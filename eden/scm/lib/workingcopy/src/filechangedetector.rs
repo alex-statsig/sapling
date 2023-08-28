@@ -22,7 +22,7 @@ use types::Key;
 use types::RepoPathBuf;
 use vfs::VFS;
 
-use crate::filesystem::ChangeType;
+use crate::filesystem::PendingChange;
 use crate::metadata;
 use crate::metadata::HgModifiedTime;
 use crate::metadata::Metadata;
@@ -30,30 +30,30 @@ use crate::metadata::Metadata;
 pub type ArcReadFileContents = Arc<dyn ReadFileContents<Error = anyhow::Error> + Send + Sync>;
 
 pub(crate) enum FileChangeResult {
-    Yes(ChangeType),
+    Yes(PendingChange),
     No(RepoPathBuf),
     Maybe((RepoPathBuf, Metadata)),
 }
 
 impl FileChangeResult {
     fn changed(path: RepoPathBuf) -> Self {
-        Self::Yes(ChangeType::Changed(path))
+        Self::Yes(PendingChange::Changed(path))
     }
 
     fn deleted(path: RepoPathBuf) -> Self {
-        Self::Yes(ChangeType::Deleted(path))
+        Self::Yes(PendingChange::Deleted(path))
     }
 }
 
 #[derive(Debug)]
-pub enum ResolvedFileChangeResult {
-    Yes(ChangeType),
-    No(RepoPathBuf),
+pub(crate) enum ResolvedFileChangeResult {
+    Yes(PendingChange),
+    No((RepoPathBuf, Option<Metadata>)),
 }
 
 impl ResolvedFileChangeResult {
     fn changed(path: RepoPathBuf) -> Self {
-        Self::Yes(ChangeType::Changed(path))
+        Self::Yes(PendingChange::Changed(path))
     }
 }
 
@@ -64,7 +64,7 @@ pub(crate) trait FileChangeDetectorTrait:
     fn total_work_hint(&self, _hint: u64) {}
 }
 
-pub struct FileChangeDetector {
+pub(crate) struct FileChangeDetector {
     vfs: VFS,
     last_write: HgModifiedTime,
     results: Vec<Result<ResolvedFileChangeResult>>,
@@ -235,28 +235,30 @@ fn compare_repo_bytes_to_disk(
     repo_bytes: Bytes,
     path: RepoPathBuf,
 ) -> Result<ResolvedFileChangeResult> {
-    match vfs.read(&path) {
-        Ok(disk_bytes) => {
+    match vfs.read_with_metadata(&path) {
+        Ok((disk_bytes, metadata)) => {
             if disk_bytes == repo_bytes {
                 tracing::trace!(?path, "no (contents match)");
-                Ok(ResolvedFileChangeResult::No(path))
+                Ok(ResolvedFileChangeResult::No((path, Some(metadata.into()))))
             } else {
                 tracing::trace!(?path, "changed (contents mismatch)");
-                Ok(ResolvedFileChangeResult::Yes(ChangeType::Changed(path)))
+                Ok(ResolvedFileChangeResult::Yes(PendingChange::Changed(path)))
             }
         }
         Err(e) => {
             if let Some(e) = e.downcast_ref::<std::io::Error>() {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     tracing::trace!(?path, "deleted (file missing)");
-                    return Ok(ResolvedFileChangeResult::Yes(ChangeType::Deleted(path)));
+                    return Ok(ResolvedFileChangeResult::Yes(PendingChange::Deleted(path)));
                 }
             }
 
             if let Some(vfs::AuditError::ThroughSymlink(_)) = e.downcast_ref::<vfs::AuditError>() {
                 tracing::trace!(?path, "deleted (read through symlink)");
-                return Ok(ResolvedFileChangeResult::Yes(ChangeType::Deleted(path)));
+                return Ok(ResolvedFileChangeResult::Yes(PendingChange::Deleted(path)));
             }
+
+            tracing::trace!(?path, ?e);
 
             Err(e)
         }
@@ -288,7 +290,8 @@ impl FileChangeDetectorTrait for FileChangeDetector {
                 }
                 FileChangeResult::No(path) => {
                     self.progress.increase_position(1);
-                    self.results.push(Ok(ResolvedFileChangeResult::No(path)))
+                    self.results
+                        .push(Ok(ResolvedFileChangeResult::No((path, None))))
                 }
                 FileChangeResult::Maybe((path, meta)) => {
                     self.lookups.insert(path, meta);

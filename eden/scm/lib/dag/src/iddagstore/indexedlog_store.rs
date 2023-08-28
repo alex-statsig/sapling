@@ -39,6 +39,7 @@ use crate::spanset::Span;
 use crate::IdSet;
 use crate::Level;
 use crate::Result;
+use crate::VerLink;
 
 pub struct IndexedLogStore {
     log: log::Log,
@@ -374,14 +375,16 @@ impl IdDagStore for IndexedLogStore {
         Ok(Box::new(iter.map(|item| item.map(|(_, seg)| seg))))
     }
 
-    /// Mark non-master ids as "removed".
-    fn remove_non_master(&mut self) -> Result<()> {
-        self.log.append(Self::MAGIC_CLEAR_NON_MASTER)?;
-        let non_master_ids = self.all_ids_in_groups(&[Group::NON_MASTER])?;
-        if !non_master_ids.is_empty() {
-            return bug("remove_non_master did not take effect");
-        }
-        Ok(())
+    fn verlink(&self) -> VerLink {
+        let str_id = self.path.display().to_string();
+        let version = self.log.version();
+        VerLink::from_storage_version_or_new(&str_id, version)
+    }
+
+    fn cache_verlink(&self, verlink: &VerLink) {
+        let str_id = self.path.display().to_string();
+        let version = self.log.version();
+        verlink.associate_storage_version(str_id, version);
     }
 }
 

@@ -5,7 +5,7 @@
  * GNU General Public License version 2.
  */
 
-#include "ObjectStore.h"
+#include "eden/fs/store/ObjectStore.h"
 
 #include <folly/Conv.h>
 #include <folly/futures/Future.h>
@@ -46,6 +46,7 @@ std::shared_ptr<ObjectStore> ObjectStore::create(
     std::shared_ptr<ProcessNameCache> processNameCache,
     std::shared_ptr<StructuredLogger> structuredLogger,
     std::shared_ptr<const EdenConfig> edenConfig,
+    bool windowsSymlinksEnabled,
     CaseSensitivity caseSensitive) {
   return std::shared_ptr<ObjectStore>{new ObjectStore{
       std::move(backingStore),
@@ -54,6 +55,7 @@ std::shared_ptr<ObjectStore> ObjectStore::create(
       processNameCache,
       structuredLogger,
       edenConfig,
+      windowsSymlinksEnabled,
       caseSensitive}};
 }
 
@@ -64,6 +66,7 @@ ObjectStore::ObjectStore(
     std::shared_ptr<ProcessNameCache> processNameCache,
     std::shared_ptr<StructuredLogger> structuredLogger,
     std::shared_ptr<const EdenConfig> edenConfig,
+    bool windowsSymlinksEnabled,
     CaseSensitivity caseSensitive)
     : metadataCache_{folly::in_place, kCacheSize},
       treeCache_{std::move(treeCache)},
@@ -73,7 +76,8 @@ ObjectStore::ObjectStore(
       processNameCache_(processNameCache),
       structuredLogger_(structuredLogger),
       edenConfig_(edenConfig),
-      caseSensitive_{caseSensitive} {
+      caseSensitive_{caseSensitive},
+      windowsSymlinksEnabled_{windowsSymlinksEnabled} {
   XCHECK(backingStore_);
   XCHECK(stats_);
 }
@@ -92,8 +96,9 @@ void ObjectStore::updateProcessFetch(
   }
 }
 
-void ObjectStore::sendFetchHeavyEvent(pid_t pid, uint64_t fetch_count) const {
-  auto processName = processNameCache_->getProcessName(pid);
+void ObjectStore::sendFetchHeavyEvent(ProcessId pid, uint64_t fetch_count)
+    const {
+  auto processName = processNameCache_->getProcessName(pid.get());
   if (processName) {
     std::replace(processName->begin(), processName->end(), '\0', ' ');
     XLOG(WARN) << "Heavy fetches (" << fetch_count << ") from process "
@@ -108,8 +113,7 @@ void ObjectStore::sendFetchHeavyEvent(pid_t pid, uint64_t fetch_count) const {
 
 void ObjectStore::deprioritizeWhenFetchHeavy(
     ObjectFetchContext& context) const {
-  auto pid = context.getClientPid();
-  if (pid.has_value()) {
+  if (auto pid = context.getClientPid()) {
     auto fetch_count = pidFetchCounts_->getCountByPid(pid.value());
     auto threshold = edenConfig_->fetchHeavyThreshold.getValue();
     if (threshold && fetch_count >= threshold) {
@@ -162,21 +166,20 @@ std::shared_ptr<const Tree> changeCaseSensitivity(
 
 } // namespace
 
-ImmediateFuture<shared_ptr<const Tree>> ObjectStore::getRootTree(
+ImmediateFuture<ObjectStore::GetRootTreeResult> ObjectStore::getRootTree(
     const RootId& rootId,
     const ObjectFetchContextPtr& context) const {
   XLOG(DBG3) << "getRootTree(" << rootId << ")";
   return backingStore_->getRootTree(rootId, context)
       .thenValue(
           [treeCache = treeCache_, rootId, caseSensitive = caseSensitive_](
-              std::shared_ptr<const Tree> tree) {
-            if (!tree) {
-              throw_<std::domain_error>("unable to import root ", rootId);
-            }
+              BackingStore::GetRootTreeResult result) {
+            treeCache->insert(result.treeId, result.tree);
 
-            treeCache->insert(tree);
-
-            return changeCaseSensitivity(std::move(tree), caseSensitive);
+            return GetRootTreeResult{
+                changeCaseSensitivity(std::move(result.tree), caseSensitive),
+                result.treeId,
+            };
           });
 }
 
@@ -236,7 +239,7 @@ ImmediateFuture<shared_ptr<const Tree>> ObjectStore::getTree(
           throwf<std::domain_error>("tree {} not found", id);
         }
 
-        self->treeCache_->insert(result.tree);
+        self->treeCache_->insert(result.tree->getHash(), result.tree);
         fetchContext->didFetch(ObjectFetchContext::Tree, id, result.origin);
         self->updateProcessFetch(*fetchContext);
         return changeCaseSensitivity(

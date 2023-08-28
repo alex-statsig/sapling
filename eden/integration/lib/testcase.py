@@ -314,6 +314,11 @@ class EdenTestCase(EdenTestCaseBase):
             f.write(contents.encode())
         os.chmod(fullpath, mode)
 
+    def chmod(self, path: str, mode: int = 0o644) -> None:
+        """Create or overwrite a file with the given contents."""
+        fullpath = self.get_path(path)
+        os.chmod(fullpath, mode)
+
     def rename(self, from_path: str, to_path: str) -> None:
         """Rename a file/directory at the specified paths relative to the
         clone.
@@ -401,6 +406,7 @@ class EdenRepoTest(EdenTestCase):
     repo: repobase.Repository
     repo_name: str
     repo_type: str
+    inode_catalog_type: str
 
     enable_logview: bool = False
 
@@ -418,16 +424,22 @@ class EdenRepoTest(EdenTestCase):
     # case sensitivities on a single platform.
     is_case_sensitive: Optional[bool] = None
 
+    enable_windows_symlinks: bool = False
+
     def setup_eden_test(self) -> None:
         super().setup_eden_test()
 
         self.repo_name = "main"
+        self.inode_catalog_type = "sqlite" if sys.platform == "win32" else "legacy"
         self.repo = self.create_repo(self.repo_name)
         self.populate_repo()
         self.report_time("repository setup done")
 
         self.eden.clone(
-            self.repo.path, self.mount, case_sensitive=self.is_case_sensitive
+            self.repo.path,
+            self.mount,
+            case_sensitive=self.is_case_sensitive,
+            enable_windows_symlinks=self.enable_windows_symlinks,
         )
         self.report_time("eden clone done")
         actual_case_sensitive = self.eden.is_case_sensitive(self.mount)
@@ -650,7 +662,9 @@ class HgRepoTestMixin:
         # it before the real create_hg_repo() name.  We can't change the MRO without
         # breaking resolution of create_repo().
         # pyre-fixme[16]: `HgRepoTestMixin` has no attribute `create_hg_repo`.
-        return self.create_hg_repo(name)
+        return self.create_hg_repo(
+            name, init_configs=["experimental.windows-symlinks=True"]
+        )
 
 
 class GitRepoTestMixin:

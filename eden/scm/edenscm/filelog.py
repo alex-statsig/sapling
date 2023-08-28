@@ -148,7 +148,7 @@ class filelog(revlog.revlog):
         return newlen >= addlen and delta[hlen : hlen + addlen] == add
 
 
-class fileslog(object):
+class fileslog:
     """Top level object representing all the file storage.
 
     Eventually filelog content access should go through this, but for now it's
@@ -162,7 +162,7 @@ class fileslog(object):
             gitstore = git.openstore(repo)
             self.contentstore = gitstore
             self.filescmstore = gitstore
-        elif eagerepo.iseagerepo(repo):
+        elif eagerepo.iseagerepo(repo) or repo.storage_format() == "revlog":
             store = repo._rsrepo.eagerstore()
             self.contentstore = store
             self.filescmstore = store

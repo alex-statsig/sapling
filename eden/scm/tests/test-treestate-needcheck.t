@@ -1,10 +1,6 @@
-#chg-compatible
 #debugruntest-compatible
 
   $ eagerepo
-  $ setconfig workingcopy.ruststatus=False
-FIXME(status):
-  $ setconfig status.use-rust=false
 
 Emulate situations where NEED_CHECK was added to normal files and there should
 be a way to remove them.
@@ -76,6 +72,8 @@ Run "hg status" and NEED_CHECK can be removed:
   $ sleep 1
   $ hg status
 
+Non-fsmonitor skips "B" to save work since it is outside the matcher.
   $ hg debugtree list
   A: 0100644 1 + EXIST_P1 EXIST_NEXT 
-  B: 0100644 1 + EXIST_P1 EXIST_NEXT 
+  B: 0100644 1 + EXIST_P1 EXIST_NEXT  (fsmonitor !)
+  B: 0100644 1 -1 EXIST_P1 EXIST_NEXT NEED_CHECK  (no-fsmonitor !)

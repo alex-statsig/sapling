@@ -58,8 +58,8 @@ describe('ChunkSelectState', () => {
       expect(renderLines(state)).toMatchObject([
         '[x] -  1    aa',
         '[x] -  2    bb',
-        '   !-  3    cc',
-        '   !-  4    dd',
+        '   !-  3  1 cc',
+        '   !-  4  2 dd',
         '[ ] +     3 ee',
         '[ ] +     4 ff',
       ]);
@@ -155,6 +155,84 @@ describe('ChunkSelectState', () => {
         state = state.setSelectedText(text);
         expect(state.getSelectedText()).toBe(text);
       }
+    });
+  });
+
+  describe('getInverseText()', () => {
+    it('produces changes with inverse selection', () => {
+      const state = ChunkSelectState.fromText(a, b, a).setSelectedLines([
+        [0, true],
+        [4, true],
+      ]);
+      expect(renderLines(state)).toMatchObject([
+        '[x] -  1    aa',
+        '[ ] -  2    bb',
+        '       3  1 cc',
+        '       4  2 dd',
+        '[x] +     3 ee',
+        '[ ] +     4 ff',
+      ]);
+      expect(state.getSelectedText()).toBe('bb\ncc\ndd\nee\n');
+      expect(state.getInverseText()).toBe('aa\ncc\ndd\nff\n');
+    });
+  });
+
+  describe('getLineRegions()', () => {
+    it('produces a region when nothing is changed', () => {
+      const state = ChunkSelectState.fromText(a, a, a);
+      expect(state.getLineRegions()).toMatchObject([
+        {
+          lines: state.getLines(),
+          same: true,
+          collapsed: true,
+        },
+      ]);
+    });
+
+    it('produces a region when everything is changed', () => {
+      const a = 'a\na\na\n';
+      const b = 'b\nb\nb\nb\n';
+      [a, b].forEach(m => {
+        const state = ChunkSelectState.fromText(a, b, m);
+        expect(state.getLineRegions()).toMatchObject([
+          {
+            lines: state.getLines(),
+            same: false,
+            collapsed: false,
+          },
+        ]);
+      });
+    });
+
+    it('produces regions with complex changes', () => {
+      const state = ChunkSelectState.fromText(
+        '1\n2\n3\n4\n8\n9\n',
+        '1\n2\n3\n5\n8\n9\n',
+        '1\n2\n3\n5\n8\n9\n',
+      );
+      const lines = state.getLines();
+      expect(state.getLineRegions()).toMatchObject([
+        {
+          lines: lines.slice(0, 1),
+          collapsed: true,
+          same: true,
+        },
+        {
+          lines: lines.slice(1, 3),
+          collapsed: false,
+          same: true,
+        },
+        {
+          lines: lines.slice(3, 5),
+          collapsed: false,
+          same: false,
+        },
+        {
+          lines: lines.slice(5, 7),
+          collapsed: false,
+          same: true,
+        },
+      ]);
     });
   });
 });

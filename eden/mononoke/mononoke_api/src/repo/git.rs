@@ -16,15 +16,12 @@ use bonsai_tag_mapping::BonsaiTagMappingRef;
 use chrono::DateTime;
 use chrono::FixedOffset;
 use context::CoreContext;
-use filestore::hash_bytes;
-use filestore::Sha1IncrementalHasher;
-use megarepo_error::cloneable_error;
+use git_types::GitError;
 use mononoke_types::bonsai_changeset::BonsaiAnnotatedTag;
 use mononoke_types::hash::GitSha1;
-use mononoke_types::BlobstoreBytes;
 use mononoke_types::BonsaiChangesetMut;
 use mononoke_types::DateTime as MononokeDateTime;
-use thiserror::Error;
+use repo_blobstore::RepoBlobstoreRef;
 
 use crate::changeset::ChangesetContext;
 use crate::errors::MononokeError;
@@ -35,43 +32,6 @@ const HGGIT_MARKER_VALUE: &[u8] = b"git";
 const HGGIT_COMMIT_ID_EXTRA: &str = "convert_revision";
 const GIT_OBJECT_PREFIX: &str = "git_object";
 const SEPARATOR: &str = ".";
-
-#[derive(Clone, Debug, Error)]
-pub enum GitError {
-    /// The provided hash and the derived hash do not match for the given content.
-    #[error("Input hash {0} does not match the SHA1 hash {1} of the content")]
-    HashMismatch(String, String),
-
-    /// The input hash is not a valid SHA1 hash.
-    #[error("Input hash {0} is not a valid SHA1 git hash")]
-    InvalidHash(String),
-
-    /// The raw object content provided do not correspond to a valid git object.
-    #[error("Invalid git object content provided for object ID {0}. Cause: {1}")]
-    InvalidContent(String, GitInternalError),
-
-    /// The requested bubble does not exist.  Either it was never created or has expired.
-    #[error(
-        "The object corresponding to object ID {0} is a git blob. Cannot upload raw blob content"
-    )]
-    DisallowedBlobObject(String),
-
-    /// Failed to get or store the git object in Mononoke store.
-    #[error("Failed to get or store the git object (ID: {0}) in blobstore. Cause: {1}")]
-    StorageFailure(String, GitInternalError),
-
-    /// The git object doesn't exist in the Mononoke store.
-    #[error("The object corresponding to object ID {0} does not exist in the data store")]
-    NonExistentObject(String),
-
-    /// The provided git object could not be converted to a valid bonsai changeset.
-    #[error(
-        "Validation failure while persisting git object (ID: {0}) as a bonsai changeset. Cause: {1}"
-    )]
-    InvalidBonsai(String, GitInternalError),
-}
-
-cloneable_error!(GitInternalError);
 
 impl RepoContext {
     /// Set the bonsai to git mapping based on the changeset
@@ -117,16 +77,22 @@ impl RepoContext {
     /// Upload serialized git objects
     pub async fn upload_git_object(
         &self,
-        git_hash: &git_hash::oid,
+        git_hash: &gix_hash::oid,
         raw_content: Vec<u8>,
     ) -> anyhow::Result<(), GitError> {
-        upload_git_object(&self.ctx, self.inner_repo(), git_hash, raw_content).await
+        upload_git_object(
+            &self.ctx,
+            self.inner_repo().repo_blobstore(),
+            git_hash,
+            raw_content,
+        )
+        .await
     }
 
     /// Create Mononoke counterpart of Git tree object
     pub async fn create_git_tree(
         &self,
-        git_tree_hash: &git_hash::oid,
+        git_tree_hash: &gix_hash::oid,
     ) -> anyhow::Result<(), GitError> {
         create_git_tree(&self.ctx, self.inner_repo(), git_tree_hash).await
     }
@@ -156,50 +122,23 @@ impl RepoContext {
 }
 
 /// Free function for uploading serialized git objects
-pub async fn upload_git_object(
+pub async fn upload_git_object<B>(
     ctx: &CoreContext,
-    repo: &impl repo_blobstore::RepoBlobstoreRef,
-    git_hash: &git_hash::oid,
+    blobstore: &B,
+    git_hash: &gix_hash::oid,
     raw_content: Vec<u8>,
-) -> anyhow::Result<(), GitError> {
-    // Check if the provided Sha1 hash (i.e. ObjectId) of the bytes actually corresponds to the hash of the bytes
-    let bytes = bytes::Bytes::from(raw_content);
-    let sha1_hash = hash_bytes(Sha1IncrementalHasher::new(), &bytes);
-    if sha1_hash.as_ref() != git_hash.as_bytes() {
-        return Err(GitError::HashMismatch(
-            git_hash.to_hex().to_string(),
-            sha1_hash.to_hex().to_string(),
-        ));
-    };
-    // Check if the bytes actually correspond to a valid Git object
-    let blobstore_bytes = BlobstoreBytes::from_bytes(bytes.clone());
-    let git_obj = git_object::ObjectRef::from_loose(bytes.as_ref()).map_err(|e| {
-        GitError::InvalidContent(
-            git_hash.to_hex().to_string(),
-            anyhow::anyhow!(e.to_string()).into(),
-        )
-    })?;
-    // Check if the git object is not a raw content blob. Raw content blobs are uploaded directly through
-    // LFS. This method supports git commits, trees, tags, notes and similar pointer objects.
-    if let git_object::ObjectRef::Blob(_) = git_obj {
-        return Err(GitError::DisallowedBlobObject(
-            git_hash.to_hex().to_string(),
-        ));
-    }
-    // The bytes are valid, upload to blobstore with the key:
-    // git_object_{hex-value-of-hash}
-    let blobstore_key = format!("{}{}{}", GIT_OBJECT_PREFIX, SEPARATOR, git_hash.to_hex());
-    repo.repo_blobstore()
-        .put(ctx, blobstore_key, blobstore_bytes)
-        .await
-        .map_err(|e| GitError::StorageFailure(git_hash.to_hex().to_string(), e.into()))
+) -> anyhow::Result<(), GitError>
+where
+    B: Blobstore + Clone,
+{
+    git_types::upload_git_object(ctx, blobstore, git_hash, raw_content).await
 }
 
 /// Free function for creating Mononoke counterpart of Git tree object
 pub async fn create_git_tree(
     ctx: &CoreContext,
     repo: &(impl changesets::ChangesetsRef + repo_blobstore::RepoBlobstoreRef),
-    git_tree_hash: &git_hash::oid,
+    git_tree_hash: &gix_hash::oid,
 ) -> anyhow::Result<(), GitError> {
     let blobstore_key = format!(
         "{}{}{}",

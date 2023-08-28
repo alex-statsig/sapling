@@ -3,7 +3,6 @@
   $ configure modern
   $ enable tweakdefaults
   $ setconfig tweakdefaults.showupdated=true
-  $ setconfig workingcopy.ruststatus=false
 
 Test utils:
 
@@ -70,7 +69,7 @@ Test that various code paths in debugexportstack are exercised:
         'text': 'B'},
        {'author': 'test',
         'date': [0.0, 0],
-        'files': {'C': {'dataBase85': "b'`)v'"}, 'Z': {'data': 'B', 'flags': 'l'}},
+        'files': {'C': {'dataBase85': '`)v'}, 'Z': {'data': 'B', 'flags': 'l'}},
         'immutable': False,
         'node': 'd2a2ca8387f2339934b6ce3fb17992433e06fdd4',
         'parents': ['8b5b077308ecdd37270b7b94d98d64d27c170dfb'],
@@ -111,7 +110,7 @@ Test that various code paths in debugexportstack are exercised:
         'date': [0.0, 0],
         'immutable': False,
         'node': 'f5086e168b2741946a5118463a8be38273822529',
-        'relevantFiles': {'B': {'data': '3', 'flags': 'x'}, 'B1': None, 'C': {'dataBase85': "b'`)v'"}, 'D': {'copyFrom': 'A', 'data': '2'}, 'G': None, 'X': None},
+        'relevantFiles': {'B': {'data': '3', 'flags': 'x'}, 'B1': None, 'C': {'dataBase85': '`)v'}, 'D': {'copyFrom': 'A', 'data': '2'}, 'G': None, 'X': None},
         'requested': False,
         'text': 'D'},
        {'author': 'test',
@@ -357,11 +356,14 @@ Import stack:
             > [["commit", {"text": "J1", "mark": ":10.1", "files": {"x1": {"data": "x1\n", "flags": ".", "copyFrom": "."}, "x2": {"data": "x2\n", "flags": "."}}, "parents": `marks :9`}]]
             > EOS
 
-      # Write files.
+      # Write or delete files.
+      # Deleted files will remove "A" status.
+      # Written files will remove "R" status.
 
-        $ newrepo
+        $ newrepo repo-write --config format.use-eager-repo=True
         $ echo 1 > a
         $ echo 3 > c
+        $ hg add c
         $ hg debugimportstack << EOS
         > [["write", {"a": {"data": "2\n"}, "b": {"dataBase85": "GYS"}, "c": null}]]
         > EOS
@@ -376,6 +378,54 @@ Import stack:
         3
         <<<
         c: file not found
+        $ hg st  # no "A c" or "! c"
+        ? a
+        ? b
+        >>> assert "c" not in _
+        $ hg commit -m 'Add a, b' -A a b
+
+        $ hg rm a
+        $ hg debugimportstack << EOS
+        > [["write", {"a": {"data": "3\n"}}]]
+        > EOS
+        {}
+        $ hg st  # no "R a"
+        M a
+        >>> assert "R a" not in _
+
+      # Amend
+      # Update Y to Y1, edit content of file Y to Y1, add new file P:
+
+        $ newrepo
+        $ drawdag << 'EOS'
+        > X-Y  # Y/X=X1
+        > EOS
+        $ hg debugimportstack << EOS
+        > [["amend", {"node": "$Y", "mark": ":1", "text": "Y1", "files": {"Y": {"data": "Y1"}, "P": {"data": "P"}}}]]
+        > EOS
+        {":1": "8567a23e6951126a1fc726a73324ee76ff5ed2cc"}
+        $ hg log -Gr 'all()' -T '{desc}'
+        o  Y1
+        │
+        o  X
+        $ hg cat -r 'desc(Y)' P X Y
+        PX1Y1 (no-eol)
+
+      # Refer to working copy parent.
+      # X is reverted from "XXX" to "X1"
+      # Z is reverted from "Z" to "not found"
+
+        $ hg up -q 'desc(Y)'
+        $ echo XXX > X
+        $ echo Z > Z
+        $ hg debugimportstack << EOS
+        > [["write", {"Z": ".", "X": "."}]]
+        > EOS
+        {}
+        $ cat X Z
+        cat: Z: $ENOENT$
+        X1 (no-eol)
+        [1]
 
       # Error cases.
 

@@ -7,6 +7,8 @@
 
 use std::fmt;
 
+use anyhow::anyhow;
+use anyhow::Result;
 use mononoke_types::FileType;
 use serde_derive::Serialize;
 
@@ -32,14 +34,13 @@ impl Type {
         self == &Type::Tree
     }
 
-    pub fn manifest_suffix(&self) -> &'static str {
-        // It's a little weird that this returns a Unicode string and not a bytestring, but that's
-        // what callers demand.
+    pub fn manifest_suffix(&self) -> Result<&'static [u8]> {
         match self {
-            Type::Tree => "t",
-            Type::File(FileType::Symlink) => "l",
-            Type::File(FileType::Executable) => "x",
-            Type::File(FileType::Regular) => "",
+            Type::Tree => Ok(b"t"),
+            Type::File(FileType::Symlink) => Ok(b"l"),
+            Type::File(FileType::Executable) => Ok(b"x"),
+            Type::File(FileType::Regular) => Ok(b""),
+            Type::File(FileType::GitSubmodule) => Err(anyhow!("Git submodules not supported")),
         }
     }
 }

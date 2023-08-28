@@ -50,7 +50,7 @@ def _writessherror(ui: "Any", s: bytes) -> None:
             ui.write_err(prefix, decodeutf8(l, errors="replace"), "\n")
 
 
-class countingpipe(object):
+class countingpipe:
     """Wraps a pipe that count the number of bytes read/written to it"""
 
     def __init__(self, ui, pipe):
@@ -96,7 +96,7 @@ class countingpipe(object):
         return self._pipe.flush()
 
 
-class threadedstderr(object):
+class threadedstderr:
     def __init__(self, ui, stderr):
         self._ui = ui
         self._stderr = stderr
@@ -353,8 +353,12 @@ def _popen4testhgserve(path, env=None, newlines: bool = False, bufsize: int = -1
             return True
 
         with open(file, "rb") as file:
-            start = file.read(12)
-            return (b"#!/bin/bash" in start) or (b"#!/bin/sh" in start)
+            start = file.read(32)
+            return (
+                (b"#!/bin/bash" in start)
+                or (b"#!/bin/sh" in start)
+                or b"env bash" in start
+            )
         return False
 
     # Append "defpath" (ex. /bin) to PATH.  Needed for buck test (the main hg

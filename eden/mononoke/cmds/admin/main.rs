@@ -19,7 +19,6 @@ use fbinit::FacebookInit;
 use slog::error;
 
 use crate::blobstore_fetch::subcommand_blobstore_fetch;
-use crate::blobstore_unlink::subcommand_blobstore_unlink;
 use crate::blobstore_upload::subcommand_blobstore_upload;
 use crate::bonsai_fetch::subcommand_bonsai_fetch;
 use crate::content_fetch::subcommand_content_fetch;
@@ -28,10 +27,8 @@ use crate::error::SubcommandError;
 use crate::filenodes::subcommand_filenodes;
 use crate::hash_convert::subcommand_hash_convert;
 use crate::hg_changeset::subcommand_hg_changeset;
-use crate::redaction::subcommand_redaction;
 
 mod blobstore_fetch;
-mod blobstore_unlink;
 mod blobstore_upload;
 mod bonsai_fetch;
 mod bookmarks_manager;
@@ -43,7 +40,6 @@ mod error;
 mod filenodes;
 mod hash_convert;
 mod hg_changeset;
-mod redaction;
 mod rsync;
 mod subcommand_blame;
 mod subcommand_deleted_manifest;
@@ -62,14 +58,12 @@ fn setup_app<'a, 'b>() -> MononokeClapApp<'a, 'b> {
         .build()
         .about("Poke at mononoke internals for debugging and investigating data structures.")
         .subcommand(blobstore_fetch::build_subcommand())
-        .subcommand(blobstore_unlink::build_subcommand())
         .subcommand(blobstore_upload::build_subcommand())
         .subcommand(bonsai_fetch::build_subcommand())
         .subcommand(content_fetch::build_subcommand())
         .subcommand(bookmarks_manager::build_subcommand())
         .subcommand(hg_changeset::build_subcommand())
         .subcommand(hash_convert::build_subcommand())
-        .subcommand(redaction::build_subcommand())
         .subcommand(filenodes::build_subcommand())
         .subcommand(subcommand_phases::build_subcommand())
         .subcommand(subcommand_unodes::build_subcommand())
@@ -99,9 +93,6 @@ fn main(fb: FacebookInit) -> ExitCode {
             (blobstore_fetch::BLOBSTORE_FETCH, Some(sub_m)) => {
                 subcommand_blobstore_fetch(fb, logger, &matches, sub_m).await
             }
-            (blobstore_unlink::BLOBSTORE_UNLINK, Some(sub_m)) => {
-                subcommand_blobstore_unlink(fb, logger, &matches, sub_m).await
-            }
             (blobstore_upload::BLOBSTORE_UPLOAD, Some(sub_m)) => {
                 subcommand_blobstore_upload(fb, logger, &matches, sub_m).await
             }
@@ -122,9 +113,6 @@ fn main(fb: FacebookInit) -> ExitCode {
             }
             (hash_convert::HASH_CONVERT, Some(sub_m)) => {
                 subcommand_hash_convert(fb, logger, &matches, sub_m).await
-            }
-            (redaction::REDACTION, Some(sub_m)) => {
-                subcommand_redaction(fb, logger, &matches, sub_m).await
             }
             (filenodes::FILENODES, Some(sub_m)) => {
                 subcommand_filenodes(fb, logger, &matches, sub_m).await

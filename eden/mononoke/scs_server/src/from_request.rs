@@ -305,6 +305,7 @@ impl FromRequest<thrift::RepoCreateCommitParamsFileType> for FileType {
             thrift::RepoCreateCommitParamsFileType::FILE => Ok(FileType::Regular),
             thrift::RepoCreateCommitParamsFileType::EXEC => Ok(FileType::Executable),
             thrift::RepoCreateCommitParamsFileType::LINK => Ok(FileType::Symlink),
+            thrift::RepoCreateCommitParamsFileType::GIT_SUBMODULE => Ok(FileType::GitSubmodule),
             val => Err(errors::invalid_request(format!(
                 "unsupported file type ({})",
                 val
@@ -384,7 +385,7 @@ impl FromRequest<thrift::DateTime> for DateTime<FixedOffset> {
 impl FromRequest<thrift::DerivedDataType> for DerivableType {
     fn from_request(data_type: &thrift::DerivedDataType) -> Result<Self, thrift::RequestError> {
         match *data_type {
-            thrift::DerivedDataType::FSNODE | thrift::DerivedDataType::FSNODE_NEW => {
+            thrift::DerivedDataType::FSNODE | thrift::DerivedDataType::FSNODE_OLD => {
                 Ok(DerivableType::Fsnodes)
             }
             thrift::DerivedDataType::SKELETON_MANIFEST => Ok(DerivableType::SkeletonManifests),

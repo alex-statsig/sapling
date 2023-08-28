@@ -58,8 +58,8 @@ py_class!(class walker |py| {
         let matcher = extract_matcher(py, pymatcher)?;
         let walker = Walker::new(
             root.to_path_buf(),
-            dot_dir,
-            Vec::new(),
+            dot_dir.clone(),
+            vec![dot_dir.into()],
             matcher,
             include_directories,
         ).map_pyerr(py)?;
@@ -72,7 +72,8 @@ py_class!(class walker |py| {
 
     def __next__(&self) -> PyResult<Option<PyPathBuf>> {
         loop {
-            match self.inner(py).borrow_mut().next() {
+            let inner = &mut *self.inner(py).borrow_mut();
+            match py.allow_threads(|| inner.next()) {
                 Some(Ok(path)) => return Ok(Some(PyPathBuf::from(path.as_ref()))),
                 Some(Err(e)) => self._errors(py).borrow_mut().push(e),
                 None => return Ok(None),
@@ -100,6 +101,7 @@ py_class!(pub class workingcopy |py| {
         &self,
         pymatcher: Option<PyObject>,
         lastwrite: u32,
+        include_ignored: bool,
         config: &config,
     ) -> PyResult<PyObject> {
         let wc = self.inner(py).write();
@@ -111,7 +113,7 @@ py_class!(pub class workingcopy |py| {
         let config = config.get_cfg(py);
         pystatus::to_python_status(py,
             &py.allow_threads(|| {
-                wc.status(matcher, last_write, &config, &io)
+                wc.status(matcher, last_write, include_ignored, &config, &io)
             }).map_pyerr(py)?
         )
     }

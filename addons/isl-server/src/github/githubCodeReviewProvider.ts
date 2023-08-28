@@ -8,18 +8,13 @@
 import type {CodeReviewProvider} from '../CodeReviewProvider';
 import type {Logger} from '../logger';
 import type {
-  CheckSuiteConnection,
+  PullRequestReviewDecision,
   YourPullRequestsQueryData,
   YourPullRequestsQueryVariables,
 } from './generated/graphql';
 import type {CodeReviewSystem, DiffSignalSummary, DiffId, Disposable, Result} from 'isl/src/types';
 
-import {
-  PullRequestState,
-  CheckStatusState,
-  CheckConclusionState,
-  YourPullRequestsQuery,
-} from './generated/graphql';
+import {PullRequestState, StatusState, YourPullRequestsQuery} from './generated/graphql';
 import queryGraphQL from './queryGraphQL';
 import {TypedEventEmitter} from 'shared/TypedEventEmitter';
 import {debounce} from 'shared/debounce';
@@ -27,12 +22,14 @@ import {debounce} from 'shared/debounce';
 export type GitHubDiffSummary = {
   type: 'github';
   title: string;
+  commitMessage: string;
   state: PullRequestState | 'DRAFT';
   number: DiffId;
   url: string;
   commentCount: number;
   anyUnresolvedComments: false;
   signalSummary?: DiffSignalSummary;
+  reviewDecision?: PullRequestReviewDecision;
 };
 
 type GitHubCodeReviewSystem = CodeReviewSystem & {type: 'github'};
@@ -78,9 +75,11 @@ export class GitHubCodeReviewProvider implements CodeReviewProvider {
         for (const summary of allSummaries.search.nodes) {
           if (summary != null && summary.__typename === 'PullRequest') {
             const id = String(summary.number);
+            const commitMessage = summary.body.slice(summary.title.length + 1);
             map.set(id, {
               type: 'github',
               title: summary.title,
+              commitMessage,
               // For some reason, `isDraft` is a separate boolean and not a state,
               // but we generally treat it as its own state in the UI.
               state:
@@ -91,12 +90,10 @@ export class GitHubCodeReviewProvider implements CodeReviewProvider {
               url: summary.url,
               commentCount: summary.comments.totalCount,
               anyUnresolvedComments: false,
-              signalSummary: githubCheckSuitesToCIStatus(
-                summary.commits.nodes?.[0]?.commit.checkSuites as
-                  | CheckSuiteConnection
-                  | null
-                  | undefined,
+              signalSummary: githubStatusRollupStateToCIStatus(
+                summary.commits.nodes?.[0]?.commit.statusCheckRollup?.state,
               ),
+              reviewDecision: summary.reviewDecision ?? undefined,
             });
           }
         }
@@ -123,42 +120,29 @@ export class GitHubCodeReviewProvider implements CodeReviewProvider {
   public getSummaryName(): string {
     return `github:${this.codeReviewSystem.hostname}/${this.codeReviewSystem.owner}/${this.codeReviewSystem.repo}`;
   }
+
+  public getDiffUrlMarkdown(diffId: DiffId): string {
+    return `[#${diffId}](https://${this.codeReviewSystem.hostname}/${this.codeReviewSystem.owner}/${this.codeReviewSystem.repo}/pull/${diffId})`;
+  }
+
+  public getCommitHashUrlMarkdown(hash: string): string {
+    return `[\`${hash.slice(0, 12)}\`](https://${this.codeReviewSystem.hostname}/${
+      this.codeReviewSystem.owner
+    }/${this.codeReviewSystem.repo}/commit/${hash})`;
+  }
 }
 
-function githubCheckSuitesToCIStatus(
-  checkSuites: CheckSuiteConnection | undefined | null,
-): DiffSignalSummary {
-  let anyInProgress = false;
-  let anyWarning = false;
-  for (const checkSuite of checkSuites?.nodes ?? []) {
-    switch (checkSuite?.status) {
-      case CheckStatusState.Completed:
-        {
-          switch (checkSuite?.conclusion) {
-            case CheckConclusionState.Success:
-              break;
-            case CheckConclusionState.Neutral:
-            case CheckConclusionState.Stale:
-            case CheckConclusionState.Skipped:
-              anyWarning = true;
-              break;
-            case CheckConclusionState.ActionRequired:
-            case CheckConclusionState.StartupFailure:
-            case CheckConclusionState.Cancelled:
-            case CheckConclusionState.TimedOut:
-            case CheckConclusionState.Failure:
-              return 'failed'; // no need to look at other signals
-          }
-        }
-        break;
-      case CheckStatusState.Waiting:
-      case CheckStatusState.Requested:
-      case CheckStatusState.Queued:
-      case CheckStatusState.Pending:
-      case CheckStatusState.InProgress:
-        anyInProgress = true;
-        break;
-    }
+function githubStatusRollupStateToCIStatus(state: StatusState | undefined): DiffSignalSummary {
+  switch (state) {
+    case undefined:
+    case StatusState.Expected:
+      return 'no-signal';
+    case StatusState.Pending:
+      return 'running';
+    case StatusState.Error:
+    case StatusState.Failure:
+      return 'failed';
+    case StatusState.Success:
+      return 'pass';
   }
-  return anyWarning ? 'warning' : anyInProgress ? 'running' : 'pass';
 }

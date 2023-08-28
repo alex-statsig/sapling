@@ -5,7 +5,7 @@
  * GNU General Public License version 2.
  */
 
-#include "GitBackingStore.h"
+#include "eden/fs/store/git/GitBackingStore.h"
 
 #include <folly/Conv.h>
 #include <folly/futures/Future.h>
@@ -107,7 +107,7 @@ std::string GitBackingStore::renderObjectId(const ObjectId& objectId) {
   return objectId.asHexString();
 }
 
-ImmediateFuture<TreePtr> GitBackingStore::getRootTree(
+ImmediateFuture<BackingStore::GetRootTreeResult> GitBackingStore::getRootTree(
     const RootId& rootId,
     const ObjectFetchContextPtr& /*context*/) {
   // TODO: Use a separate thread pool to do the git I/O
@@ -141,7 +141,7 @@ ImmediateFuture<TreePtr> GitBackingStore::getRootTree(
   ObjectId treeID = oid2Hash(git_commit_tree_id(commit));
 
   // Now get the specified tree.
-  return getTreeImpl(treeID);
+  return GetRootTreeResult{getTreeImpl(treeID), treeID};
 }
 
 SemiFuture<BackingStore::GetTreeResult> GitBackingStore::getTree(
@@ -244,7 +244,7 @@ BlobPtr GitBackingStore::getBlobImpl(const ObjectId& id) {
       blob);
 
   // Create the blob
-  return std::make_shared<BlobPtr::element_type>(id, std::move(buf));
+  return std::make_shared<BlobPtr::element_type>(std::move(buf));
 }
 
 folly::SemiFuture<BackingStore::GetBlobMetaResult>

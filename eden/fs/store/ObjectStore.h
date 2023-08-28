@@ -17,6 +17,7 @@
 #include "eden/fs/model/Hash.h"
 #include "eden/fs/model/RootId.h"
 #include "eden/fs/model/TreeEntry.h"
+#include "eden/fs/model/TreeFwd.h"
 #include "eden/fs/store/IObjectStore.h"
 #include "eden/fs/store/ImportPriority.h"
 #include "eden/fs/store/ObjectFetchContext.h"
@@ -31,16 +32,15 @@ class EdenConfig;
 class EdenStats;
 class ProcessNameCache;
 class StructuredLogger;
-class Tree;
 class TreeCache;
 enum class ObjectComparison : uint8_t;
 
 using EdenStatsPtr = RefPtr<EdenStats>;
 
 struct PidFetchCounts {
-  folly::Synchronized<std::unordered_map<pid_t, uint64_t>> map_;
+  folly::Synchronized<std::unordered_map<ProcessId, uint64_t>> map_;
 
-  uint64_t recordProcessFetch(pid_t pid) {
+  uint64_t recordProcessFetch(ProcessId pid) {
     auto map_lock = map_.wlock();
     auto fetch_count = (*map_lock)[pid]++;
     return fetch_count;
@@ -50,7 +50,7 @@ struct PidFetchCounts {
     map_.wlock()->clear();
   }
 
-  uint64_t getCountByPid(pid_t pid) {
+  uint64_t getCountByPid(ProcessId pid) {
     auto rl = map_.rlock();
     auto fetch_count = rl->find(pid);
     if (fetch_count != rl->end()) {
@@ -85,6 +85,7 @@ class ObjectStore : public IObjectStore,
       std::shared_ptr<ProcessNameCache> processNameCache,
       std::shared_ptr<StructuredLogger> structuredLogger,
       std::shared_ptr<const EdenConfig> edenConfig,
+      bool windowsSymlinksEnabled,
       CaseSensitivity caseSensitive);
   ~ObjectStore() override;
 
@@ -99,7 +100,7 @@ class ObjectStore : public IObjectStore,
    * send a FetchHeavy log event to Scuba. If either processNameCache_
    * or structuredLogger_ is nullptr, this function does nothing.
    */
-  void sendFetchHeavyEvent(pid_t pid, uint64_t fetch_count) const;
+  void sendFetchHeavyEvent(ProcessId pid, uint64_t fetch_count) const;
 
   /**
    * Check fetch count of the process using this fetchContext before using
@@ -146,7 +147,7 @@ class ObjectStore : public IObjectStore,
    * ready.  It may result in a std::domain_error if the specified commit ID
    * does not exist, or possibly other exceptions on error.
    */
-  ImmediateFuture<std::shared_ptr<const Tree>> getRootTree(
+  ImmediateFuture<GetRootTreeResult> getRootTree(
       const RootId& rootId,
       const ObjectFetchContextPtr& context) const override;
 
@@ -169,7 +170,7 @@ class ObjectStore : public IObjectStore,
    * is ready.  It may result in a std::domain_error if the specified tree ID
    * does not exist, or possibly other exceptions on error.
    */
-  ImmediateFuture<std::shared_ptr<const Tree>> getTree(
+  ImmediateFuture<TreePtr> getTree(
       const ObjectId& id,
       const ObjectFetchContextPtr& context) const override;
 
@@ -275,12 +276,17 @@ class ObjectStore : public IObjectStore,
    */
   bool areObjectsKnownIdentical(const ObjectId& one, const ObjectId& two) const;
 
-  folly::Synchronized<std::unordered_map<pid_t, uint64_t>>& getPidFetches() {
+  folly::Synchronized<std::unordered_map<ProcessId, uint64_t>>&
+  getPidFetches() {
     return pidFetchCounts_->map_;
   }
 
   void clearFetchCounts() {
     pidFetchCounts_->clear();
+  }
+
+  bool getWindowsSymlinksEnabled() const {
+    return windowsSymlinksEnabled_;
   }
 
  private:
@@ -292,6 +298,7 @@ class ObjectStore : public IObjectStore,
       std::shared_ptr<ProcessNameCache> processNameCache,
       std::shared_ptr<StructuredLogger> structuredLogger,
       std::shared_ptr<const EdenConfig> edenConfig,
+      bool windowsSymlinksEnabled,
       CaseSensitivity caseSensitive);
   // Forbidden copy constructor and assignment operator
   ObjectStore(ObjectStore const&) = delete;
@@ -355,6 +362,9 @@ class ObjectStore : public IObjectStore,
   // Is this ObjectStore case sensitive? This only matters for methods returning
   // Tree.
   CaseSensitivity caseSensitive_;
+
+  // Whether symlinks are enabled on Windows or not
+  bool windowsSymlinksEnabled_;
 };
 
 } // namespace facebook::eden

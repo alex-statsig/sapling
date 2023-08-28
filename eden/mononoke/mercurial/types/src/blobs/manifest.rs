@@ -23,7 +23,7 @@ use manifest::Entry;
 use manifest::Manifest;
 use sorted_vector_map::SortedVectorMap;
 
-use super::errors::ErrorKind;
+use super::errors::MononokeHgBlobError;
 use crate::nodehash::HgNodeHash;
 use crate::nodehash::NULL_HASH;
 use crate::FileType;
@@ -113,9 +113,15 @@ pub async fn fetch_manifest_envelope<B: Blobstore>(
     blobstore: &B,
     manifest_id: HgManifestId,
 ) -> Result<HgManifestEnvelope> {
+    if manifest_id == HgManifestId::new(NULL_HASH) {
+        return Err(
+            MononokeHgBlobError::HgContentMissing(manifest_id.into_nodehash(), Type::Tree).into(),
+        );
+    }
     let envelope = fetch_manifest_envelope_opt(ctx, blobstore, manifest_id).await?;
-    Ok(envelope
-        .ok_or_else(move || ErrorKind::HgContentMissing(manifest_id.into_nodehash(), Type::Tree))?)
+    Ok(envelope.ok_or_else(move || {
+        MononokeHgBlobError::HgContentMissing(manifest_id.into_nodehash(), Type::Tree)
+    })?)
 }
 
 /// Like `fetch_manifest_envelope`, but returns None if the manifest wasn't found.
@@ -124,6 +130,9 @@ pub async fn fetch_manifest_envelope_opt<B: Blobstore>(
     blobstore: &B,
     node_id: HgManifestId,
 ) -> Result<Option<HgManifestEnvelope>> {
+    if node_id == HgManifestId::new(NULL_HASH) {
+        return Ok(None);
+    }
     let blobstore_key = node_id.blobstore_key();
     let bytes = blobstore
         .get(ctx, &blobstore_key)
@@ -144,7 +153,9 @@ pub async fn fetch_manifest_envelope_opt<B: Blobstore>(
         }
         Ok(Some(envelope))
     })()
-    .context(ErrorKind::ManifestDeserializeFailed(blobstore_key))
+    .context(MononokeHgBlobError::ManifestDeserializeFailed(
+        blobstore_key,
+    ))
 }
 
 #[derive(Debug, Eq, PartialEq)]

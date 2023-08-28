@@ -204,7 +204,7 @@ def uisetup(ui) -> None:
     wireproto.commands["pushkey"] = (wireproto.pushkey, "namespace key old new")
 
     wrapfunction(bookmarks, "updatefromremote", updatefromremote)
-    if util.safehasattr(changegroup, "addchangegroup"):
+    if hasattr(changegroup, "addchangegroup"):
         wrapfunction(changegroup, "addchangegroup", addchangegroup)
     else:
         # Mercurial 3.6+
@@ -219,7 +219,7 @@ def uisetup(ui) -> None:
     # Record revlog writes
     def writeentry(orig, self, transaction, ifh, dfh, entry, data, link, offset):
         """records each revlog write to the repo's pendingrev list"""
-        if not util.safehasattr(transaction, "repo"):
+        if not hasattr(transaction, "repo"):
             return orig(self, transaction, ifh, dfh, entry, data, link, offset)
 
         e = revlog.indexformatng.unpack(entry)
@@ -348,7 +348,7 @@ def unbundle(orig, repo, cg, *args, **kwargs):
     if not issqlrepo(repo):
         return orig(repo, cg, *args, **kwargs)
 
-    isbundle2 = util.safehasattr(cg, "params")
+    isbundle2 = hasattr(cg, "params")
     islazylocking = repo.ui.configbool("experimental", "bundle2lazylocking")
     if isbundle2 and islazylocking:
         # lazy locked bundle2
@@ -494,7 +494,7 @@ def _localphasemove(orig, pushop, *args, **kwargs):
         return orig(pushop, *args, **kwargs)
 
 
-class sqlcontext(object):
+class sqlcontext:
     def __init__(
         self, repo, dbwritable=False, enforcepullfromdb=False, syncfromreplica=False
     ):
@@ -1583,7 +1583,7 @@ def wraprepo(repo) -> None:
                 )
 
             if (not ignoreduplicates) and (
-                not util.safehasattr(self, "sqlreplaytransaction")
+                not hasattr(self, "sqlreplaytransaction")
                 or not self.sqlreplaytransaction
             ):
                 minlinkrev = min(revisions, key=lambda x: x[1])[1]
@@ -1736,7 +1736,7 @@ def wraprepo(repo) -> None:
             return value.tobytes()
 
 
-class bufferedopener(object):
+class bufferedopener:
     """Opener implementation that buffers all writes in memory until
     flush or close is called.
     """
@@ -1942,7 +1942,7 @@ def addgroup(orig, self: Sized, deltas, linkmapper, transaction):
     """Copy paste of revlog.addgroup, but we ensure that the revisions are
     added in linkrev order.
     """
-    if not util.safehasattr(transaction, "repo"):
+    if not hasattr(transaction, "repo"):
         return orig(self, deltas, linkmapper, transaction)
 
     # track the base of the current delta log

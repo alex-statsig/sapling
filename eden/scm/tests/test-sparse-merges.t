@@ -1,10 +1,8 @@
-#chg-compatible
 #require no-windows
 #debugruntest-compatible
 #inprocess-hg-incompatible
 
   $ eagerepo
-  $ setconfig workingcopy.ruststatus=false
 
 test merging things outside of the sparse checkout
 

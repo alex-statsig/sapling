@@ -73,9 +73,10 @@ class BlobCache : public ObjectCache<Blob, ObjectCacheFlavor::InterestHandle> {
    * inserted blob.
    */
   BlobInterestHandle insert(
+      ObjectId id,
       ObjectPtr blob,
       Interest interest = Interest::LikelyNeededAgain) {
-    return insertInterestHandle(blob, interest);
+    return insertInterestHandle(std::move(id), std::move(blob), interest);
   }
 };
 

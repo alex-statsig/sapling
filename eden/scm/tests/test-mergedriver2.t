@@ -1,4 +1,3 @@
-#chg-compatible
 #debugruntest-compatible
 
 Test adding, removing, changing files in both merge parents, without telling
@@ -7,7 +6,6 @@ mergedriver the exact file list to change at "preprocess" time.
   $ enable mergedriver
 
   $ eagerepo
-  $ setconfig workingcopy.ruststatus=false
   $ hg init repo
   $ cd repo
   $ drawdag << 'EOS'

@@ -1,5 +1,7 @@
-#chg-compatible
 #debugruntest-compatible
+
+Fails on Windows+Buck w/ open file errors.
+#inprocess-hg-incompatible
 
   $ eagerepo
   $ hg init rep; cd rep

@@ -1,4 +1,3 @@
-#chg-compatible
 #debugruntest-compatible
 #inprocess-hg-incompatible
 
@@ -82,13 +81,14 @@ However, we can't prevent it from loading extensions and configs:
   $ mkdir -p badrepo/.hg
   $ echo 'invalid-syntax' > badrepo/.hg/hgrc
   $ hg log -b -Rbadrepo default
-  hg: parse errors: unable to read repo config to get repo name
+  hg: parse errors: "$TESTTMP/a/badrepo/.hg/hgrc":
+  line 1: expect '[section]' or 'name = value'
   
   [255]
 
 (XXX: Rust io::Error does not contain path information)
   $ hg log -b --cwd=inexistent default
-  abort: $ENOENT$ (os error *) (glob)
+  abort: $ENOENT$
   [255]
 
   $ hg log -b '--config=ui.traceback=yes' 2>&1 | grep '^Traceback'

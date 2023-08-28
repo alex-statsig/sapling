@@ -7,13 +7,12 @@
 # With copied file using the heuristics copytracing:
 
   $ eagerepo
-  $ setconfig workingcopy.ruststatus=false
 
   $ enable mergedriver
 
   $ newrepo
   $ enable copytrace amend
-  $ setconfig 'copytrace.draftusefullcopytrace=0' 'experimental.copytrace=off' 'copytrace.fastcopytrace=1' 'experimental.mergedriver=python:$TESTTMP/m.py'
+  $ setconfig 'copytrace.draftusefullcopytrace=0' 'experimental.copytrace=off' 'experimental.mergedriver=python:$TESTTMP/m.py'
 
   $ drawdag << 'EOS'
   > B C
@@ -55,7 +54,7 @@
 
 # Run again with heuristics copytrace disabled:
 
-  $ setconfig 'extensions.copytrace=!' 'experimental.copytrace=on' 'copytrace.fastcopytrace=0'
+  $ setconfig 'extensions.copytrace=!' 'experimental.copytrace=on'
 
   $ hg up -q $C
   $ hg graft book-B

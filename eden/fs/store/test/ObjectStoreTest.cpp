@@ -59,6 +59,7 @@ struct ObjectStoreTest : ::testing::Test {
         std::make_shared<ProcessNameCache>(),
         std::make_shared<NullStructuredLogger>(),
         EdenConfig::createTestEdenConfig(),
+        true,
         kPathMapDefaultCaseSensitive);
 
     auto configWithBlake3Key = EdenConfig::createTestEdenConfig();
@@ -79,6 +80,7 @@ struct ObjectStoreTest : ::testing::Test {
         std::make_shared<ProcessNameCache>(),
         std::make_shared<NullStructuredLogger>(),
         std::move(configWithBlake3Key),
+        true,
         kPathMapDefaultCaseSensitive);
 
     readyBlobId = putReadyBlob("readyblob");
@@ -87,13 +89,13 @@ struct ObjectStoreTest : ::testing::Test {
 
   ObjectId putReadyBlob(folly::StringPiece data) {
     {
-      auto* storedBlob = fakeBackingStoreWithKeyedBlake3->putBlob(data);
+      auto [storedBlob, id] = fakeBackingStoreWithKeyedBlake3->putBlob(data);
       storedBlob->setReady();
     }
 
-    StoredBlob* storedBlob = fakeBackingStore->putBlob(data);
+    auto [storedBlob, id] = fakeBackingStore->putBlob(data);
     storedBlob->setReady();
-    return storedBlob->get().getHash();
+    return id;
   }
 
   ObjectId putReadyTree() {
@@ -212,6 +214,7 @@ TEST_F(ObjectStoreTest, getBlobSizeFromLocalStore) {
       std::make_shared<ProcessNameCache>(),
       std::make_shared<NullStructuredLogger>(),
       EdenConfig::createTestEdenConfig(),
+      true,
       kPathMapDefaultCaseSensitive);
 
   size_t expectedSize = data.size();
@@ -307,9 +310,9 @@ TEST_F(ObjectStoreTest, get_size_and_sha1_and_blake3_only_imports_blob_once) {
 
 class PidFetchContext final : public ObjectFetchContext {
  public:
-  PidFetchContext(pid_t pid) : ObjectFetchContext{}, pid_{pid} {}
+  explicit PidFetchContext(ProcessId pid) : ObjectFetchContext{}, pid_{pid} {}
 
-  std::optional<pid_t> getClientPid() const override {
+  OptionalProcessId getClientPid() const override {
     return pid_;
   }
 
@@ -323,13 +326,13 @@ class PidFetchContext final : public ObjectFetchContext {
   }
 
  private:
-  pid_t pid_;
+  ProcessId pid_;
 };
 
 TEST_F(ObjectStoreTest, test_process_access_counts) {
-  pid_t pid0{10000};
+  auto pid0 = ProcessId(10000);
   ObjectFetchContextPtr pidContext0 = makeRefPtr<PidFetchContext>(pid0);
-  pid_t pid1{10001};
+  auto pid1 = ProcessId(10001);
   ObjectFetchContextPtr pidContext1 = makeRefPtr<PidFetchContext>(pid1);
 
   // first fetch increments fetch count for pid0
@@ -400,10 +403,9 @@ TEST_F(
   auto context = makeRefPtr<FetchContext>();
 
   auto one = putReadyBlob("foo");
-  auto storedBlob =
-      fakeBackingStore->putBlob(ObjectId{"not_a_content_hash"}, "foo");
+  auto two = ObjectId{"not_a_constant_hash"};
+  auto storedBlob = fakeBackingStore->putBlob(two, "foo");
   storedBlob->setReady();
-  auto two = storedBlob->get().getHash();
 
   auto fut =
       objectStore->areBlobsEqual(one, two, context.as<ObjectFetchContext>());

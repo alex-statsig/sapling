@@ -6,6 +6,7 @@
  */
 
 #include <folly/portability/OpenSSL.h>
+#include <filesystem>
 
 #include "eden/common/utils/WinError.h"
 #include "eden/fs/digest/Blake3.h"
@@ -21,6 +22,32 @@ constexpr size_t kBufSize = 8192;
 template <typename Hasher>
 void hash(Hasher&& hasher, AbsolutePathPiece filePath) {
   const auto widePath = filePath.wide();
+
+  // On Windows we need to calculate the hash of symlinks for commands such as
+  // `hg status` and `hg goto`. In POSIX FileInode::isSameAsFast overlay info
+  // that is not available on Windows allows us to avoid comparing symlinks by
+  // hash, whereas on Windows we have to go through this somewhat slower step.
+  std::error_code ec;
+  auto stdPath = std::filesystem::path(widePath);
+  auto lnk = std::filesystem::read_symlink(stdPath, ec);
+  if (ec.value() == 0) {
+    std::wstring lnkW = lnk.wstring();
+    std::string content;
+    std::transform(
+        lnkW.begin(), lnkW.end(), std::back_inserter(content), [](wchar_t c) {
+          return (char)c;
+        });
+    if (std::isalpha(content[0]) && content[1] == ':') {
+      // Symlinks with absolute paths use UNC paths. However, std's read_symlink
+      // returns the target without its UNC prefix. If this is not converted
+      // back to an UNC path, we get hashing errors.
+      content = canonicalPath(content).asString();
+    }
+    std::replace(content.begin(), content.end(), '\\', '/');
+    hasher(content.c_str(), content.size());
+    return;
+  }
+
   HANDLE fileHandle = CreateFileW(
       widePath.c_str(),
       GENERIC_READ,

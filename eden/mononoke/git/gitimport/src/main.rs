@@ -53,13 +53,15 @@ use slog::info;
 
 use crate::mem_writes_changesets::MemWritesChangesets;
 
+pub const HEAD_SYMREF: &str = "HEAD";
+
 // Refactor this a bit. Use a thread pool for git operations. Pass that wherever we use store repo.
 // Transform the walk into a stream of commit + file changes.
 
 async fn derive_hg(
     ctx: &CoreContext,
     repo: &BlobRepo,
-    import_map: impl Iterator<Item = (&git_hash::ObjectId, &ChangesetId)>,
+    import_map: impl Iterator<Item = (&gix_hash::ObjectId, &ChangesetId)>,
 ) -> Result<(), Error> {
     let mut hg_manifests = HashMap::new();
 
@@ -112,6 +114,9 @@ struct GitimportArgs {
     /// Use at your own risk!
     #[clap(long)]
     generate_bookmarks: bool,
+    /// If set, will record the HEAD symref in Mononoke for the given repo
+    #[clap(long)]
+    record_head_symref: bool,
     /// When set, the gitimport tool would bypass the read-only check while creating and moving bookmarks.
     #[clap(long)]
     bypass_readonly: bool,
@@ -239,21 +244,36 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
             .await
             .context("derive_hg failed")?;
     }
-
+    if args.record_head_symref {
+        let symref_entry = import_tools::read_symref(HEAD_SYMREF, path, &prefs)
+            .await
+            .context("read_symrefs failed")?;
+        repo.inner()
+            .git_symbolic_refs
+            .add_or_update_entries(vec![symref_entry])
+            .await
+            .context("failed to add symbolic ref entries")?;
+    }
     if !args.suppress_ref_mapping || args.generate_bookmarks {
         let refs = import_tools::read_git_refs(path, &prefs)
             .await
             .context("read_git_refs failed")?;
         let mapping = refs
-            .iter()
+            .into_iter()
             .map(|(git_ref, commit)| {
-                (
+                Ok((
                     git_ref.maybe_tag_id,
-                    String::from_utf8_lossy(&git_ref.name),
-                    gitimport_result.get(commit),
-                )
+                    String::from_utf8(git_ref.name).map_err(|err| {
+                        anyhow::anyhow!(
+                            "Failed to parse git ref name {:?} due to invalid UTF-8 encoding, Cause: {}",
+                            err.as_bytes(),
+                            err.utf8_error()
+                        )
+                    })?,
+                    gitimport_result.get(&commit),
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<anyhow::Result<Vec<_>>>()?;
         if !args.suppress_ref_mapping {
             for (_, name, changeset) in &mapping {
                 info!(ctx.logger(), "Ref: {:?}: {:?}", name, changeset);

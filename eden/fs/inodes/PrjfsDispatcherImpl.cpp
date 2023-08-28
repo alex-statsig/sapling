@@ -14,6 +14,7 @@
 #include <folly/executors/QueuedImmediateExecutor.h>
 #include <folly/logging/xlog.h>
 #include <folly/stop_watch.h>
+#include <optional>
 #include "eden/fs/config/CheckoutConfig.h"
 #include "eden/fs/inodes/EdenMount.h"
 #include "eden/fs/inodes/FileInode.h"
@@ -65,7 +66,9 @@ std::string makeDotEdenConfig(EdenMount& mount) {
 PrjfsDispatcherImpl::PrjfsDispatcherImpl(EdenMount* mount)
     : PrjfsDispatcher(mount->getStats().copy()),
       mount_{mount},
-      dotEdenConfig_{makeDotEdenConfig(*mount)} {}
+      dotEdenConfig_{makeDotEdenConfig(*mount)},
+      symlinksEnabled_{
+          mount_->getCheckoutConfig()->getEnableWindowsSymlinks()} {}
 
 EdenTimestamp PrjfsDispatcherImpl::getLastCheckoutTime() const {
   return mount_->getLastCheckoutTime();
@@ -81,8 +84,12 @@ ImmediateFuture<std::vector<PrjfsDirEntry>> PrjfsDispatcherImpl::opendir(
                      auto&&) mutable {
         bool isRoot = path.empty();
         return mount_->getTreeOrTreeEntry(path, context)
-            .thenValue([isRoot,
+            .thenValue([this,
+                        path,
+                        isRoot,
                         objectStore = mount_->getObjectStore(),
+                        symlinksSupported = mount_->getCheckoutConfig()
+                                                ->getEnableWindowsSymlinks(),
                         context = context.copy()](
                            std::variant<std::shared_ptr<const Tree>, TreeEntry>
                                treeOrTreeEntry) mutable {
@@ -94,11 +101,49 @@ ImmediateFuture<std::vector<PrjfsDirEntry>> PrjfsDispatcherImpl::opendir(
               for (const auto& treeEntry : *tree) {
                 if (treeEntry.second.isTree()) {
                   ret.emplace_back(
-                      treeEntry.first, true, ImmediateFuture<uint64_t>(0ull));
+                      treeEntry.first,
+                      true,
+                      std::nullopt,
+                      ImmediateFuture<uint64_t>(0ull));
                 } else {
-                  auto sizeFut = objectStore->getBlobSize(
-                      treeEntry.second.getHash(), context);
-                  ret.emplace_back(treeEntry.first, false, std::move(sizeFut));
+                  auto optSymlinkTargetFut =
+                      (symlinksSupported &&
+                       treeEntry.second.getDtype() == dtype_t::Symlink)
+                      ? std::make_optional(
+                            objectStore
+                                ->getBlob(
+                                    treeEntry.second.getHash(), context.copy())
+                                .thenValue(
+                                    [this,
+                                     name = treeEntry.first,
+                                     path,
+                                     context = context.copy()](
+                                        std::shared_ptr<const Blob> blob) {
+                                      auto content = blob->asString();
+                                      std::replace(
+                                          content.begin(),
+                                          content.end(),
+                                          '/',
+                                          '\\');
+                                      auto symlinkPath = path.empty()
+                                          ? RelativePath(name)
+                                          : path + name;
+                                      return isFinalSymlinkPathDirectory(
+                                                 symlinkPath, content, context)
+                                          .thenValue(
+                                              [content = std::move(content)](
+                                                  bool isDir) {
+                                                return std::make_pair(
+                                                    content, isDir);
+                                              });
+                                    }))
+                      : std::nullopt;
+                  ret.emplace_back(
+                      treeEntry.first,
+                      false,
+                      std::move(optSymlinkTargetFut),
+                      objectStore->getBlobSize(
+                          treeEntry.second.getHash(), context.copy()));
                 }
               }
 
@@ -106,6 +151,7 @@ ImmediateFuture<std::vector<PrjfsDirEntry>> PrjfsDispatcherImpl::opendir(
                 ret.emplace_back(
                     kDotEdenPathComponent,
                     true,
+                    std::nullopt,
                     ImmediateFuture<uint64_t>(0ull));
               }
 
@@ -121,6 +167,7 @@ ImmediateFuture<std::vector<PrjfsDirEntry>> PrjfsDispatcherImpl::opendir(
                     ret.emplace_back(
                         PathComponent{kConfigTable},
                         false,
+                        std::nullopt,
                         ImmediateFuture<uint64_t>(dotEdenConfig_.size()));
                     return folly::Try{ret};
                   } else {
@@ -140,6 +187,100 @@ ImmediateFuture<std::vector<PrjfsDirEntry>> PrjfsDispatcherImpl::opendir(
       });
 }
 
+ImmediateFuture<bool> PrjfsDispatcherImpl::isFinalSymlinkPathDirectory(
+    RelativePath symlink,
+    string_view targetStringView,
+    const ObjectFetchContextPtr& context,
+    const int remainingRecursionDepth) {
+  if (remainingRecursionDepth == 0) {
+    return false;
+  }
+
+  bool newCheck = true;
+  {
+    // We need to mark symlinks as visited to avoid infinite loops.
+    auto sptr = symlinkCheck_.wlock();
+    auto rs = sptr->emplace(symlink);
+    newCheck = rs.second;
+  }
+  if (!newCheck) {
+    return false;
+  }
+
+  return makeImmediateFutureWith([&]() -> ImmediateFuture<bool> {
+           // Creating absolute path symlinks with a variety of tools (e.g.,
+           // mklink on Windows or os.symlink on Python) makes the created
+           // symlinks start with an UNC prefix. However, there could be tools
+           // that create symlinks that don't add this prefix.
+           // TODO: Make this line also consider tools that do not add an UNC
+           // prefix to absolute path symlinks.
+           auto targetString = targetStringView.starts_with(detail::kUNCPrefix)
+               ? std::string(targetStringView)
+               : fmt::format(
+                     "{}{}{}",
+                     mount_->getPath() + symlink.dirname(),
+                     kDirSeparatorStr,
+                     targetStringView);
+           AbsolutePath absTarget;
+           try {
+             absTarget = canonicalPath(targetString);
+           } catch (const std::exception& exc) {
+             XLOG(DBG6) << "unable to resolve target for symlink "
+                        << symlink.asString() << ": " << exc.what();
+             return false;
+           }
+           RelativePath target;
+           try {
+             target = RelativePath(mount_->getPath().relativize(absTarget));
+           } catch (const std::exception&) {
+             // Symlink points outside of EdenFS; make the system solve it for
+             // us
+             boost::system::error_code ec;
+             auto boostPath = boost::filesystem::path(absTarget.asString());
+             auto fileType = boost::filesystem::status(boostPath, ec).type();
+             return fileType == boost::filesystem::directory_file;
+           }
+           // This recursively goes through symlinks until it gets the first
+           // entry that is not a symlink. Symlink cycles are prevented by the
+           // check above.
+           return mount_->getTreeOrTreeEntry(target, context)
+               .thenValue(
+                   [this,
+                    target,
+                    context = context.copy(),
+                    remainingRecursionDepth](
+                       std::variant<std::shared_ptr<const Tree>, TreeEntry>
+                           treeOrTreeEntry) mutable -> ImmediateFuture<bool> {
+                     if (std::holds_alternative<std::shared_ptr<const Tree>>(
+                             treeOrTreeEntry)) {
+                       return true;
+                     }
+                     auto entry = std::get<TreeEntry>(treeOrTreeEntry);
+                     if (entry.getDtype() != dtype_t::Symlink) {
+                       return false;
+                     }
+                     return mount_->getObjectStore()
+                         ->getBlob(entry.getHash(), context)
+                         .thenValue([this,
+                                     context = context.copy(),
+                                     path = target,
+                                     remainingRecursionDepth](
+                                        std::shared_ptr<const Blob> blob) {
+                           auto content = blob->asString();
+                           return isFinalSymlinkPathDirectory(
+                               path,
+                               content,
+                               context,
+                               remainingRecursionDepth - 1);
+                         });
+                   });
+         })
+      .ensure([this, symlink] {
+        auto sptr = symlinkCheck_.wlock();
+        sptr->erase(symlink);
+      });
+}
+
 ImmediateFuture<std::optional<LookupResult>> PrjfsDispatcherImpl::lookup(
     RelativePath path,
     const ObjectFetchContextPtr& context) {
@@ -155,48 +296,115 @@ ImmediateFuture<std::optional<LookupResult>> PrjfsDispatcherImpl::lookup(
               bool isDir = std::holds_alternative<std::shared_ptr<const Tree>>(
                   treeOrTreeEntry);
               auto pathFut = mount_->canonicalizePathFromTree(path, context);
-              auto sizeFut = isDir
-                  ? ImmediateFuture<uint64_t>{0ull}
-                  : mount_->getObjectStore()->getBlobSize(
-                        std::get<TreeEntry>(treeOrTreeEntry).getHash(),
-                        context);
+              auto treeEntry = isDir
+                  ? std::nullopt
+                  : std::make_optional(std::get<TreeEntry>(treeOrTreeEntry));
+              auto sizeFut = isDir ? ImmediateFuture<uint64_t>{0ull}
+                                   : mount_->getObjectStore()->getBlobSize(
+                                         treeEntry->getHash(), context);
+              bool isSymlink = !symlinksEnabled_ || isDir
+                  ? false
+                  : treeEntry->getDtype() == dtype_t::Symlink;
 
-              return collectAllSafe(pathFut, sizeFut)
-                  .thenValue([this, isDir, context = context.copy()](
-                                 std::tuple<RelativePath, uint64_t> res) {
-                    auto [path, size] = std::move(res);
-                    auto lookupResult = LookupResult{path, size, isDir};
+              auto symlinkAttrsFut = isSymlink
+                  ? mount_->getObjectStore()
+                        ->getBlob(treeEntry->getHash(), context)
+                        .thenValue(
+                            [this,
+                             path = path.copy(),
+                             context = context.copy()](
+                                std::shared_ptr<const Blob> blob)
+                                -> ImmediateFuture<std::pair<
+                                    std::optional<std::string>,
+                                    bool>> {
+                              auto content = blob->asString();
+                              // ProjectedFS does consider / as a valid
+                              // separator, but trying to open symlinks with
+                              // forward slashes on Windows generally doesn't
+                              // work. This also applies to having symlinks in
+                              // places other than EdenFS. So we replace them
+                              // with backslashes.
+                              //
+                              // Additionally, since creating a commit
+                              // normalizes backward slashes to forward slashes
+                              // in the commit itself, we need to normalize to
+                              // turn them back into backtward ones. We need to
+                              // do this here due to the fact that this also
+                              // applies to absolute paths which most of the
+                              // time contain UNC prefixes. For instance, if we
+                              // created a symlink to the directory "C:\foo" and
+                              // then tried to create a commit containing this
+                              // symlink, we would end up with "//?/C:/foo" in
+                              // the commit itself, and when checking out this
+                              // commit, we would need to convert it to
+                              // "\\?\C:\foo" so that we can properly check that
+                              // this symlinks is a directory in
+                              // `isFinalSymlinkPathDirectory`
+                              std::replace(
+                                  content.begin(), content.end(), '/', '\\');
+                              return isFinalSymlinkPathDirectory(
+                                         path, content, context)
+                                  .thenValue(
+                                      [content = std::move(content)](bool isDir)
+                                          -> std::pair<
+                                              std::optional<std::string>,
+                                              bool> {
+                                        return {content, isDir};
+                                      });
+                            })
+                  : ImmediateFuture<
+                        std::pair<std::optional<std::string>, bool>>{
+                        {std::nullopt, false}};
 
-                    // We need to run the following asynchronously to avoid the
-                    // risk of deadlocks when EdenFS recursively triggers this
-                    // lookup call. In rare situation, this might happen during
-                    // a checkout operation which is already holding locks that
-                    // the code below also need.
-                    folly::via(
-                        getNotificationExecutor(),
-                        [&mount = *mount_,
-                         path = std::move(path),
-                         context = context.copy()]() {
-                          // Finally, let's tell the TreeInode that this file
-                          // needs invalidation during update. This is run in a
-                          // separate executor to avoid deadlocks. This is
-                          // guaranteed to 1) run before any other changes to
-                          // this inode, and 2) before checkout starts
-                          // invalidating files/directories. This also cannot
-                          // race with a decFsRefcount from
-                          // TreeInode::invalidateChannelEntryCache due to
-                          // getInodeSlow needing to acquire the content lock
-                          // that invalidateChannelEntryCache is already
-                          // holding.
-                          mount.getInodeSlow(path, context)
-                              .thenValue([](InodePtr inode) {
-                                inode->incFsRefcount();
-                              })
-                              .get();
-                        });
+              return collectAllSafe(pathFut, sizeFut, symlinkAttrsFut)
+                  .thenValue(
+                      [this, isDir, context = context.copy()](
+                          std::tuple<
+                              RelativePath,
+                              uint64_t,
+                              std::pair<std::optional<std::string>, bool>>
+                              res) {
+                        auto [path, size, symlinkAttrs] = std::move(res);
+                        auto symlinkDestination = symlinkAttrs.first;
+                        auto symlinkIsDirectory = symlinkAttrs.second;
+                        auto lookupResult = LookupResult{
+                            path,
+                            size,
+                            isDir || symlinkIsDirectory,
+                            std::move(symlinkDestination)};
 
-                    return std::optional{std::move(lookupResult)};
-                  });
+                        // We need to run the following asynchronously to
+                        // avoid the risk of deadlocks when EdenFS recursively
+                        // triggers this lookup call. In rare situation, this
+                        // might happen during a checkout operation which is
+                        // already holding locks that the code below also
+                        // need.
+                        folly::via(
+                            getNotificationExecutor(),
+                            [&mount = *mount_,
+                             path = std::move(path),
+                             context = context.copy()]() {
+                              // Finally, let's tell the TreeInode that this
+                              // file needs invalidation during update. This
+                              // is run in a separate executor to avoid
+                              // deadlocks. This is guaranteed to 1) run
+                              // before any other changes to this inode, and
+                              // 2) before checkout starts invalidating
+                              // files/directories. This also cannot race with
+                              // a decFsRefcount from
+                              // TreeInode::invalidateChannelEntryCache due to
+                              // getInodeSlow needing to acquire the content
+                              // lock that invalidateChannelEntryCache is
+                              // already holding.
+                              mount.getInodeSlow(path, context)
+                                  .thenValue([](InodePtr inode) {
+                                    inode->incFsRefcount();
+                                  })
+                                  .get();
+                            });
+
+                        return std::optional{std::move(lookupResult)};
+                      });
             })
             .thenTry(
                 [this, path = std::move(path)](
@@ -207,10 +415,13 @@ ImmediateFuture<std::optional<LookupResult>> PrjfsDispatcherImpl::lookup(
                     if (isEnoent(*exc)) {
                       if (path == kDotEdenConfigPath) {
                         return folly::Try{std::optional{LookupResult{
-                            std::move(path), dotEdenConfig_.length(), false}}};
+                            std::move(path),
+                            dotEdenConfig_.length(),
+                            false,
+                            std::nullopt}}};
                       } else if (path == kDotEdenRelativePath) {
-                        return folly::Try{std::optional{
-                            LookupResult{std::move(path), 0, true}}};
+                        return folly::Try{std::optional{LookupResult{
+                            std::move(path), 0, true, std::nullopt}}};
                       } else {
                         XLOG(DBG6) << path << ": File not found";
                         return folly::Try<std::optional<LookupResult>>{
@@ -266,7 +477,8 @@ ImmediateFuture<std::string> PrjfsDispatcherImpl::read(
               auto& treeEntry = std::get<TreeEntry>(treeOrTreeEntry);
               return objectStore->getBlob(treeEntry.getHash(), context)
                   .thenValue([](std::shared_ptr<const Blob> blob) {
-                    // TODO(xavierd): directly return the Blob to the caller.
+                    // TODO(xavierd): directly return the Blob to the
+                    // caller.
                     std::string res;
                     blob->getContents().appendTo(res);
                     return res;
@@ -306,9 +518,9 @@ ImmediateFuture<TreeInodePtr> createDirInode(
           /*
            * ProjectedFS notifications are asynchronous and sent after the
            * fact. This means that we can get a notification on a
-           * file/directory before the parent directory notification has been
-           * completed. This should be a very rare event and thus the code
-           * below is pessimistic and will try to create all parent
+           * file/directory before the parent directory notification has
+           * been completed. This should be a very rare event and thus the
+           * code below is pessimistic and will try to create all parent
            * directories.
            */
 
@@ -338,11 +550,29 @@ ImmediateFuture<TreeInodePtr> createDirInode(
       });
 }
 
-enum class OnDiskState {
+enum class OnDiskStateTypes {
   MaterializedFile,
+  MaterializedSymlink,
   MaterializedDirectory,
   NotPresent,
 };
+
+struct OnDiskState {
+  OnDiskStateTypes type;
+  std::optional<boost::filesystem::path> symlinkTarget;
+
+  explicit OnDiskState(
+      OnDiskStateTypes _type,
+      std::optional<boost::filesystem::path> _target = std::nullopt)
+      : type(_type), symlinkTarget(_target) {}
+};
+
+ImmediateFuture<OnDiskState> recheckDiskState(
+    const EdenMount& mount,
+    RelativePathPiece path,
+    std::chrono::steady_clock::time_point receivedAt,
+    int retry,
+    OnDiskStateTypes expectedType);
 
 ImmediateFuture<OnDiskState> getOnDiskState(
     const EdenMount& mount,
@@ -356,34 +586,35 @@ ImmediateFuture<OnDiskState> getOnDiskState(
   auto fileType = boost::filesystem::symlink_status(boostPath, ec).type();
 
   if (fileType == boost::filesystem::regular_file) {
-    return OnDiskState::MaterializedFile;
+    return recheckDiskState(
+        mount, path, receivedAt, retry, OnDiskStateTypes::MaterializedFile);
   } else if (fileType == boost::filesystem::symlink_file) {
-    return OnDiskState::MaterializedFile;
+    if (mount.getCheckoutConfig()->getEnableWindowsSymlinks()) {
+      auto symlinkTarget = boost::filesystem::read_symlink(boostPath, ec);
+      if (ec.value() == 0) {
+        return OnDiskState(
+            OnDiskStateTypes::MaterializedSymlink, symlinkTarget);
+      }
+      return getOnDiskState(mount, path, receivedAt, retry + 1);
+    }
+    return OnDiskState(OnDiskStateTypes::MaterializedFile);
   } else if (fileType == boost::filesystem::reparse_file) {
     // Boost reports anything that is a reparse point which is not a symlink a
     // reparse_file. In particular, socket are reported as such.
-    return OnDiskState::MaterializedFile;
+    return OnDiskState(OnDiskStateTypes::MaterializedFile);
   } else if (fileType == boost::filesystem::directory_file) {
-    const auto elapsed = std::chrono::steady_clock::now() - receivedAt;
-    const auto delay =
-        mount.getEdenConfig()->prjfsDirectoryCreationDelay.getValue();
-    if (elapsed < delay) {
-      // See comment on EdenConfig::prjfsDirectoryCreationDelay for what's going
-      // on here.
-      auto timeToSleep =
-          std::chrono::duration_cast<folly::HighResDuration>(delay - elapsed);
-      return ImmediateFuture{folly::futures::sleep(timeToSleep)}.thenValue(
-          [&mount, path = path.copy(), retry, receivedAt](folly::Unit&&) {
-            return getOnDiskState(mount, path, receivedAt, retry);
-          });
-    }
-    return OnDiskState::MaterializedDirectory;
+    return recheckDiskState(
+        mount,
+        path,
+        receivedAt,
+        retry,
+        OnDiskStateTypes::MaterializedDirectory);
   } else if (fileType == boost::filesystem::file_not_found) {
-    return OnDiskState::NotPresent;
+    return OnDiskState(OnDiskStateTypes::NotPresent);
   } else if (fileType == boost::filesystem::status_error) {
     if (retry == 5) {
       XLOG(WARN) << "Assuming path is not present: " << path;
-      return OnDiskState::NotPresent;
+      return OnDiskState(OnDiskStateTypes::NotPresent);
     }
     XLOG(WARN) << "Error: " << ec.message() << " for path: " << path;
     return ImmediateFuture{folly::futures::sleep(retry * 5ms)}.thenValue(
@@ -394,6 +625,30 @@ ImmediateFuture<OnDiskState> getOnDiskState(
     return makeImmediateFuture<OnDiskState>(std::logic_error(
         fmt::format("Unknown file type {} for file {}", fileType, path)));
   }
+}
+
+ImmediateFuture<OnDiskState> recheckDiskState(
+    const EdenMount& mount,
+    RelativePathPiece path,
+    std::chrono::steady_clock::time_point receivedAt,
+    int retry,
+    OnDiskStateTypes expectedType) {
+  if (mount.getCheckoutConfig()->getEnableWindowsSymlinks()) {
+    const auto elapsed = std::chrono::steady_clock::now() - receivedAt;
+    const auto delay =
+        mount.getEdenConfig()->prjfsDirectoryCreationDelay.getValue();
+    if (elapsed < delay) {
+      // See comment on EdenConfig::prjfsDirectoryCreationDelay for what's
+      // going on here.
+      auto timeToSleep =
+          std::chrono::duration_cast<folly::HighResDuration>(delay - elapsed);
+      return ImmediateFuture{folly::futures::sleep(timeToSleep)}.thenValue(
+          [&mount, path = path.copy(), retry, receivedAt](folly::Unit&&) {
+            return getOnDiskState(mount, path, receivedAt, retry);
+          });
+    }
+  }
+  return OnDiskState(expectedType);
 }
 
 ImmediateFuture<folly::Unit> fileNotificationImpl(
@@ -426,7 +681,7 @@ ImmediateFuture<folly::Unit> handleNotPresentFileNotification(
           .thenValue(
               [this, &mount, receivedAt](
                   OnDiskState state) mutable -> ImmediateFuture<RelativePath> {
-                if (state == OnDiskState::MaterializedDirectory) {
+                if (state.type == OnDiskStateTypes::MaterializedDirectory) {
                   return currentPrefix_.copy();
                 }
 
@@ -541,13 +796,15 @@ ImmediateFuture<folly::Unit> recursivelyUpdateChildrens(
 ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
     const EdenMount& mount,
     RelativePath path,
-    InodeType inodeType,
+    OnDiskStateTypes diskStateType,
+    std::optional<boost::filesystem::path> symlinkTarget,
     std::chrono::steady_clock::time_point receivedAt,
     const ObjectFetchContextPtr& context) {
   return createDirInode(mount, path.dirname().copy(), context)
       .thenValue([&mount,
                   path = std::move(path),
-                  inodeType,
+                  diskStateType,
+                  symlinkTarget = std::move(symlinkTarget),
                   receivedAt,
                   context =
                       context.copy()](const TreeInodePtr treeInode) mutable {
@@ -557,7 +814,8 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                 [&mount,
                  path = std::move(path),
                  treeInode,
-                 inodeType,
+                 diskStateType,
+                 symlinkTarget = std::move(symlinkTarget),
                  receivedAt,
                  context = context.copy()](folly::Try<InodePtr> try_) mutable
                 -> ImmediateFuture<folly::Unit> {
@@ -566,7 +824,8 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                     if (auto* exc =
                             try_.tryGetExceptionObject<std::system_error>()) {
                       if (isEnoent(*exc)) {
-                        if (inodeType == InodeType::TREE) {
+                        if (diskStateType ==
+                            OnDiskStateTypes::MaterializedDirectory) {
                           auto child = treeInode->mkdir(
                               basename, _S_IFDIR, InvalidationRequired::No);
                           child->incFsRefcount();
@@ -576,6 +835,14 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                               std::move(path),
                               receivedAt,
                               context);
+                        } else if (
+                            diskStateType ==
+                            OnDiskStateTypes::MaterializedSymlink) {
+                          auto child = treeInode->symlink(
+                              basename,
+                              symlinkTarget.value().string(),
+                              InvalidationRequired::No);
+                          child->incFsRefcount();
                         } else {
                           auto child = treeInode->mknod(
                               basename, _S_IFREG, 0, InvalidationRequired::No);
@@ -588,8 +855,8 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                   }
 
                   auto inode = std::move(try_).value();
-                  switch (inodeType) {
-                    case InodeType::TREE: {
+                  switch (diskStateType) {
+                    case OnDiskStateTypes::MaterializedDirectory: {
                       if (auto inodePtr = inode.asTreePtrOrNull()) {
                         // In the case where this is already a directory, we
                         // still need to recursively add all the childrens.
@@ -637,7 +904,9 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                                 context);
                           });
                     }
-                    case InodeType::FILE: {
+                    case OnDiskStateTypes::NotPresent:
+                    case OnDiskStateTypes::MaterializedFile:
+                    case OnDiskStateTypes::MaterializedSymlink: {
                       if (auto fileInode = inode.asFilePtrOrNull()) {
                         fileInode->materialize();
                         return folly::unit;
@@ -648,7 +917,9 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                           ->removeRecursively(
                               basename, InvalidationRequired::No, context)
                           .thenTry(
-                              [basename = basename.copy(),
+                              [diskStateType,
+                               symlinkTarget,
+                               basename = basename.copy(),
                                treeInode](folly::Try<folly::Unit> try_)
                                   -> ImmediateFuture<folly::Unit> {
                                 if (auto* exc = try_.tryGetExceptionObject<
@@ -658,12 +929,21 @@ ImmediateFuture<folly::Unit> handleMaterializedFileNotification(
                                         try_.exception());
                                   }
                                 }
-                                auto child = treeInode->mknod(
-                                    basename,
-                                    _S_IFREG,
-                                    0,
-                                    InvalidationRequired::No);
-                                child->incFsRefcount();
+                                if (diskStateType ==
+                                    OnDiskStateTypes::MaterializedSymlink) {
+                                  auto child = treeInode->symlink(
+                                      basename,
+                                      symlinkTarget.value().string(),
+                                      InvalidationRequired::No);
+                                  child->incFsRefcount();
+                                } else {
+                                  auto child = treeInode->mknod(
+                                      basename,
+                                      _S_IFREG,
+                                      0,
+                                      InvalidationRequired::No);
+                                  child->incFsRefcount();
+                                }
                                 return folly::unit;
                               });
                     }
@@ -684,14 +964,25 @@ ImmediateFuture<folly::Unit> fileNotificationImpl(
                   path = std::move(path),
                   receivedAt,
                   context = context.copy()](OnDiskState state) mutable {
-        switch (state) {
-          case OnDiskState::MaterializedFile:
+        switch (state.type) {
+          case OnDiskStateTypes::MaterializedDirectory:
+          case OnDiskStateTypes::MaterializedFile:
             return handleMaterializedFileNotification(
-                mount, std::move(path), InodeType::FILE, receivedAt, context);
-          case OnDiskState::MaterializedDirectory:
+                mount,
+                std::move(path),
+                state.type,
+                std::nullopt,
+                receivedAt,
+                context);
+          case OnDiskStateTypes::MaterializedSymlink:
             return handleMaterializedFileNotification(
-                mount, std::move(path), InodeType::TREE, receivedAt, context);
-          case OnDiskState::NotPresent:
+                mount,
+                std::move(path),
+                OnDiskStateTypes::MaterializedSymlink,
+                std::move(state.symlinkTarget),
+                receivedAt,
+                context);
+          case OnDiskStateTypes::NotPresent:
             return handleNotPresentFileNotification(
                 mount, std::move(path), receivedAt, context);
         }

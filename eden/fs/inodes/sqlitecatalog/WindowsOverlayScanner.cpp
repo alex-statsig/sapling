@@ -56,12 +56,12 @@ int main(int argc, char** argv) {
       overlayPath, std::make_shared<NullStructuredLogger>());
   inodeCatalog.initOverlay(/*createIfNonExisting=*/true);
   XLOG(INFO) << "start scanning";
-  OverlayChecker::LookupCallback lookup = [](auto, auto) {
-    return makeImmediateFuture<OverlayChecker::LookupCallbackValue>(
+  InodeCatalog::LookupCallback lookup = [](auto, auto) {
+    return makeImmediateFuture<InodeCatalog::LookupCallbackValue>(
         std::runtime_error("no lookup callback"));
   };
   inodeCatalog.scanLocalChanges(
-      EdenConfig::createTestEdenConfig(), mountPath, lookup);
+      EdenConfig::createTestEdenConfig(), mountPath, true, lookup);
   XLOG(INFO) << "scanning end";
 
   return 0;

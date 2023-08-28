@@ -5,10 +5,13 @@
  * GNU General Public License version 2.
  */
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use anyhow::anyhow;
 use anyhow::Context;
 use async_runtime::block_unless_interrupted as block_on;
 use clidispatch::abort;
@@ -22,13 +25,17 @@ use configloader::hg::resolve_custom_scheme;
 use configmodel::Config;
 use configmodel::ConfigExt;
 use configmodel::ValueSource;
+use eagerepo::is_eager_repo;
+use exchange::convert_to_remote;
 use migration::feature::deprecate;
 use repo::repo::Repo;
 use repo_name::encode_repo_name;
 use tracing::instrument;
 use types::HgId;
 use url::Url;
+use util::file::atomic_write;
 use util::path::absolute;
+use util::path::create_shared_dir_all;
 
 use super::ConfigSet;
 use super::Result;
@@ -59,7 +66,7 @@ define_flags! {
         stream: bool,
 
         /// "use remotefilelog (only turn it off in legacy tests) (ADVANCED)"
-        shallow: bool = true,
+        shallow: Option<bool>,
 
         /// "use git protocol (EXPERIMENTAL)"
         git: bool,
@@ -87,13 +94,71 @@ define_flags! {
     }
 }
 
+struct CloneSource {
+    // Effective scheme, taking into account "schemes" config.
+    scheme: String,
+    // What should be used as paths.default.
+    path: String,
+    // Default bookmark (inferred from url fragment).
+    default_bookmark: Option<String>,
+}
+
 impl CloneOpts {
-    fn source_url(&self) -> Result<(Url, Option<String>)> {
+    fn source(&self, config: &dyn Config) -> Result<CloneSource> {
+        if let Some(local_path) = local_path(&self.source)? {
+            let scheme = if is_eager_repo(&local_path) {
+                "eager"
+            } else {
+                "file"
+            };
+            return Ok(CloneSource {
+                scheme: scheme.to_string(),
+                // Came from self.source, so should be UTF-8.
+                path: local_path.into_os_string().into_string().unwrap(),
+                default_bookmark: None,
+            });
+        }
+
         let mut url = Url::parse(&self.source)?;
+
+        // Fragment is only used for choosing default bookmark during clone - we
+        // don't want to persist it.
         let frag = url.fragment().map(|f| f.to_string());
         url.set_fragment(None);
-        Ok((url, frag))
+
+        Ok(CloneSource {
+            scheme: resolve_custom_scheme(config, url.clone())?
+                .scheme()
+                .to_string(),
+            path: url.to_string(),
+            default_bookmark: frag,
+        })
     }
+}
+
+fn local_path(s: &str) -> Result<Option<PathBuf>> {
+    if looks_like_windows_path(s)
+        || matches!(Url::parse(s), Err(url::ParseError::RelativeUrlWithoutBase))
+    {
+        Ok(Some(util::path::absolute(s)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn looks_like_windows_path(s: &str) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+
+    // UNC prefix
+    if s.starts_with(r"\\") {
+        return true;
+    }
+
+    // Drive prefix (e.g. "c:")
+    let bytes = s.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 pub fn run(mut ctx: ReqCtx<CloneOpts>, config: &mut ConfigSet) -> Result<u8> {
@@ -137,6 +202,11 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>, config: &mut ConfigSet) -> Result<u8> {
         "--noupdate is not compatible with --eden",
     );
 
+    abort_if!(
+        ctx.opts.eden && ctx.opts.shallow == Some(false),
+        "--shallow is required with --eden",
+    );
+
     let force_rust = config
         .get_or_default::<Vec<String>>("commands", "force-rust")?
         .contains(&"clone".to_owned());
@@ -151,20 +221,20 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>, config: &mut ConfigSet) -> Result<u8> {
         fallback!("clone.use-rust not set to True");
     }
 
-    let source_url = match ctx.opts.source_url() {
+    let source = match ctx.opts.source(config) {
         Err(_) => fallback!("invalid URL"),
-        Ok((url, _)) => match resolve_custom_scheme(config, url.clone())?.scheme() {
-            "mononoke" | "eager" | "test" => url,
+        Ok(source) => match source.scheme.as_ref() {
+            "mononoke" | "eager" | "test" => source,
             _ => fallback!("unsupported URL scheme"),
         },
     };
 
-    if !ctx.opts.updaterev.is_empty()
-        || !ctx.opts.rev.is_empty()
+    if !ctx.opts.rev.is_empty()
         || ctx.opts.pull
         || ctx.opts.stream
-        || !ctx.opts.shallow
         || ctx.opts.git
+        // Allow Rust clone to handle --updaterev if experimental.rust-clone-updaterev is set.
+        || (!ctx.opts.updaterev.is_empty() && !config.get_or_default("experimental", "rust-clone-updaterev")?)
     {
         abort_if!(
             ctx.opts.eden,
@@ -175,7 +245,7 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>, config: &mut ConfigSet) -> Result<u8> {
         fallback!("one or more unsupported options in Rust clone");
     }
 
-    config.set("paths", "default", Some(source_url.as_str()), &"arg".into());
+    config.set("paths", "default", Some(&source.path), &"arg".into());
 
     let reponame = match config.get_opt::<String>("remotefilelog", "reponame")? {
         // This gets the reponame from the --configfile config. Ignore
@@ -288,23 +358,29 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>, config: &mut ConfigSet) -> Result<u8> {
     } else {
         let mut repo = try_clone_metadata(&ctx, &mut logger, config, &reponame, &destination)?;
 
-        let target_rev = get_update_target(&mut logger, &mut repo, &ctx.opts)?;
-        if let Some((target_rev, bm)) = &target_rev {
-            logger.info(format!("Checking out '{}'", bm));
-            logger.verbose(|| {
-                format!(
-                    "Initializing non-EdenFS working copy to commit {}",
-                    target_rev.to_hex(),
-                )
-            });
-        } else {
-            logger.verbose("Initializing empty non-EdenFS working copy");
-        }
+        let target_rev = match get_update_target(&mut logger, &mut repo, &ctx.opts)? {
+            Some((id, name)) => {
+                logger.info(format!("Checking out '{}'", name));
+
+                logger.verbose(|| {
+                    format!(
+                        "Initializing non-EdenFS working copy to commit {}",
+                        id.to_hex(),
+                    )
+                });
+
+                Some(id)
+            }
+            None => {
+                logger.verbose("Initializing empty non-EdenFS working copy");
+                None
+            }
+        };
 
         clone::init_working_copy(
             &mut logger,
             &mut repo,
-            target_rev.map(|(rev, _)| rev),
+            target_rev,
             ctx.opts.enable_profile.clone(),
         )?;
     }
@@ -365,17 +441,17 @@ fn clone_metadata(
         repo_config_file_content.push('\n');
     }
 
-    let (url, frag) = ctx.opts.source_url()?;
-    if let Some(frag) = frag {
+    let source = ctx.opts.source(config)?;
+    if let Some(bm) = &source.default_bookmark {
         config.set(
             "remotenames",
             "selectivepulldefault",
-            Some(frag),
+            Some(bm),
             &"clone source".into(),
         );
     }
 
-    repo_config_file_content.push_str(format!("[paths]\ndefault = {}\n", url.as_str()).as_str());
+    repo_config_file_content.push_str(format!("[paths]\ndefault = {}\n", source.path).as_str());
 
     // Some config values are inherent to the repo and should be persisted if passed to clone.
     // This is analagous to persisting the --configfile args above.
@@ -392,13 +468,36 @@ fn clone_metadata(
         }
     }
 
+    let eager_format: bool = config.get_or_default("format", "use-eager-repo")?;
+
+    let shallow = match ctx.opts.shallow {
+        Some(shallow) => shallow,
+        // Infer non-shallow for eager->eager clone.
+        None => !eager_format || source.scheme != "eager",
+    };
+
+    if shallow {
+        config.set("format", "use-remotefilelog", Some("true"), &"clone".into());
+    } else {
+        if !eager_format {
+            fallback!("non-shallow && non-eagerepo");
+        }
+
+        abort_if!(
+            source.scheme != "eager",
+            "don't know how to clone {} into eagerepo",
+            source.path,
+        );
+
+        return eager_clone(ctx, config, source, destination);
+    }
+
     let mut repo = Repo::init(
         destination,
         config,
         Some(repo_config_file_content),
         &ctx.global_opts().config,
     )?;
-    repo.add_requirement("remotefilelog")?;
 
     let edenapi = repo.eden_api()?;
 
@@ -408,6 +507,8 @@ fn clone_metadata(
     let segmented_changelog = capabilities
         .iter()
         .any(|cap| cap == SEGMENTED_CHANGELOG_CAPABILITY);
+
+    let mut repo_needs_reload = false;
 
     if segmented_changelog {
         repo.add_store_requirement("lazychangelog")?;
@@ -424,10 +525,21 @@ fn clone_metadata(
             bookmark_names,
         )?;
         logger.verbose(|| format!("Pulled bookmarks {:?}", bookmark_ids));
+
+        if config.get_or_default("devel", "segmented-changelog-rev-compat")? {
+            // "lazytext" (vs "lazy") is required for rev compat mode, so let's
+            // migrate automatically. This migration only works for tests.
+            migrate_to_lazytext(ctx, repo.config(), repo.path())?;
+            repo_needs_reload = true;
+        }
     } else {
         revlog_clone(repo.config(), logger, ctx, destination)?;
         // reload the repo to pick up any changes written out by the revlog clone
         // such as metalog remotenames writes
+        repo_needs_reload = true;
+    }
+
+    if repo_needs_reload {
         repo = Repo::load(
             destination,
             &ctx.global_opts().config,
@@ -441,6 +553,69 @@ fn clone_metadata(
     Ok(repo)
 }
 
+fn eager_clone(
+    ctx: &ReqCtx<CloneOpts>,
+    config: &ConfigSet,
+    source: CloneSource,
+    dest: &Path,
+) -> Result<Repo> {
+    let source_path = eagerepo::EagerRepo::url_to_dir(&source.path)
+        .ok_or_else(|| anyhow!("no eagerepo at {}", source.path))?;
+    let source_dot_dir = source_path.join(identity::must_sniff_dir(&source_path)?.dot_dir());
+
+    let dest_ident = identity::default();
+    let dest_dot_dir = dest.join(dest_ident.dot_dir());
+
+    // Copy over store files.
+    recursive_copy(&source_dot_dir.join("store"), &dest_dot_dir.join("store"))?;
+    // Init working copy.
+    eagerepo::EagerRepo::open(dest)?;
+
+    let config_path = dest_dot_dir.join(dest_ident.config_repo_file());
+    atomic_write(&config_path, |f| {
+        f.write_all(format!("[paths]\ndefault = {}\n", source.path).as_bytes())
+    })?;
+
+    let mut repo = Repo::load(
+        dest,
+        &ctx.global_opts().config,
+        &ctx.global_opts().configfile,
+    )?;
+
+    // Convert bookmarks to remotenames.
+    let remote_names: BTreeMap<String, HgId> = repo
+        .local_bookmarks()?
+        .iter()
+        .map(|(bm, id)| Ok((convert_to_remote(config, bm)?, id.clone())))
+        .collect::<Result<_>>()?;
+
+    repo.set_remote_bookmarks(&remote_names)?;
+
+    let ml = repo.metalog()?;
+    let mut ml = ml.write();
+    ml.set("bookmarks", b"")?;
+    let mut opts = metalog::CommitOptions::default();
+    opts.message = "eager clone";
+    ml.commit(opts)?;
+
+    Ok(repo)
+}
+
+fn recursive_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    create_shared_dir_all(to)?;
+
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            recursive_copy(&entry.path(), &to.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), to.join(entry.file_name()))?;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn revlog_clone(
     config: &ConfigSet,
     logger: &mut TermLogger,
@@ -450,7 +625,7 @@ pub fn revlog_clone(
     let mut args = vec![
         identity::cli_name().to_string(),
         "debugrevlogclone".to_string(),
-        ctx.opts.source_url()?.0.to_string(),
+        ctx.opts.source(config)?.path,
         "-R".to_string(),
         root.to_string_lossy().to_string(),
     ];
@@ -480,6 +655,25 @@ pub fn revlog_clone(
     Ok(())
 }
 
+fn migrate_to_lazytext(ctx: &ReqCtx<CloneOpts>, config: &ConfigSet, root: &Path) -> Result<()> {
+    let args = vec![
+        identity::cli_name().to_string(),
+        "debugchangelog".to_string(),
+        "--migrate".to_string(),
+        "lazytext".to_string(),
+        "-R".to_string(),
+        root.to_str().unwrap().to_string(),
+    ];
+
+    let hg_python = HgPython::new(&args);
+    abort_if!(
+        hg_python.run_hg(args, ctx.io(), config) != 0,
+        "rev compat lazytext migration failed"
+    );
+
+    Ok(())
+}
+
 fn get_selective_bookmarks(repo: &Repo) -> Result<Vec<String>> {
     Ok(repo
         .config()
@@ -495,6 +689,14 @@ fn get_update_target(
     if clone_opts.noupdate {
         return Ok(None);
     }
+
+    if !clone_opts.updaterev.is_empty() {
+        return Ok(Some((
+            repo.resolve_commit(None, &clone_opts.updaterev)?,
+            clone_opts.updaterev.clone(),
+        )));
+    }
+
     let selective_bookmarks = get_selective_bookmarks(repo)?;
     let main_bookmark = selective_bookmarks
         .first()
@@ -503,16 +705,20 @@ fn get_update_target(
         })?
         .clone();
 
-    let remote_bookmark = exchange::convert_to_remote(repo.config(), &main_bookmark)?;
-    let remote_bookmarks = repo.remote_bookmarks()?;
-
-    match remote_bookmarks.get(&remote_bookmark) {
-        Some(rev) => Ok(Some((rev.clone(), main_bookmark))),
+    match repo.resolve_commit_opt(None, &main_bookmark)? {
+        Some(id) => return Ok(Some((id, main_bookmark))),
         None => {
             logger.info(format!(
-                "Server has no '{}' bookmark - skipping checkout.",
-                remote_bookmark,
+                "Server has no '{}' bookmark - trying tip.",
+                main_bookmark,
             ));
+
+            if let Some(tip) = repo.resolve_commit_opt(None, "tip")? {
+                return Ok(Some((tip, "tip".to_string())));
+            }
+
+            logger.info(format!("Skipping checkout - no commits available."));
+
             Ok(None)
         }
     }

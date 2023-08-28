@@ -1,7 +1,5 @@
-#chg-compatible
 #debugruntest-compatible
 #inprocess-hg-incompatible
-  $ setconfig workingcopy.ruststatus=False
   $ setconfig experimental.allowfilepeer=True
 
   $ enable amend commitcloud infinitepush rebase remotenames pullcreatemarkers phabstatus
@@ -83,6 +81,7 @@ Fake land the commit
   >           "nodes": [
   >             {
   >               "number": 1234,
+  >               "diff_status_name": "Closed",
   >               "phabricator_versions": {
   >                 "nodes": [
   >                   {"local_commits": []}

@@ -35,6 +35,33 @@ namespace {
 // so limit total memory usage to around 1 MB per mount.
 static_assert(CheckSize<PrjfsTraceEvent, 48>());
 
+PPWPI2 placeholderExtendedInfo2_{nullptr};
+PPFDEB2 prjFillDirEntryBuffer2_{nullptr};
+
+// TODO: Remove once the build has switched to a more recent SDK
+HRESULT PrjWritePlaceholderInfo2(
+    PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT namespaceVirtualizationContext,
+    PCWSTR destinationFileName,
+    const PRJ_PLACEHOLDER_INFO* placeholderInfo,
+    UINT32 placeholderInfoSize,
+    const PRJ_EXTENDED_INFO* ExtendedInfo) {
+  return placeholderExtendedInfo2_(
+      namespaceVirtualizationContext,
+      destinationFileName,
+      placeholderInfo,
+      placeholderInfoSize,
+      ExtendedInfo);
+}
+
+HRESULT PrjFillDirEntryBuffer2(
+    PRJ_DIR_ENTRY_BUFFER_HANDLE dirEntryBufferHandle,
+    PCWSTR fileName,
+    PRJ_FILE_BASIC_INFO* fileBasicInfo,
+    PRJ_EXTENDED_INFO* extendedInfo) {
+  return prjFillDirEntryBuffer2_(
+      dirEntryBufferHandle, fileName, fileBasicInfo, extendedInfo);
+}
+
 folly::ReadMostlySharedPtr<PrjfsChannelInner> getChannel(
     const PRJ_CALLBACK_DATA* callbackData) noexcept {
   XDCHECK(callbackData);
@@ -309,6 +336,8 @@ HRESULT getFileData(
 void cancelCommand(const PRJ_CALLBACK_DATA* callbackData) noexcept {
   allowRecursiveCallbacks(callbackData);
   // TODO(T67329233): Interrupt the future.
+  XLOG(DBG6) << "Cancellation requested for command: "
+             << callbackData->CommandId;
 }
 
 namespace {
@@ -574,8 +603,21 @@ HRESULT PrjfsChannelInner::getEnumerationData(
                 PathComponent(entry.name),
                 fileInfo.FileSize);
 
-            auto result =
-                PrjFillDirEntryBuffer(entry.name.c_str(), &fileInfo, buffer);
+            HRESULT result = 0;
+            if (entry.symlinkTarget.has_value()) {
+              auto content = entry.symlinkTarget.value();
+              fileInfo.FileSize = 0;
+              _PRJ_EXTENDED_INFO extInfo;
+              extInfo.Symlink.TargetName =
+                  std::wstring(content.begin(), content.end()).c_str();
+              extInfo.InfoType = _PRJ_EXT_INFO_TYPE::PRJ_EXT_INFO_TYPE_SYMLINK;
+              extInfo.NextInfoOffset = 0;
+              result = PrjFillDirEntryBuffer2(
+                  buffer, entry.name.c_str(), &fileInfo, &extInfo);
+            } else {
+              result =
+                  PrjFillDirEntryBuffer(entry.name.c_str(), &fileInfo, buffer);
+            }
             if (FAILED(result)) {
               if (result == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) &&
                   added) {
@@ -644,11 +686,31 @@ HRESULT PrjfsChannelInner::getPlaceholderInfo(
               placeholderInfo.FileBasicInfo.ChangeTime = prjTime;
               auto inodeName = lookupResult.path.wide();
 
-              HRESULT result = PrjWritePlaceholderInfo(
-                  virtualizationContext,
-                  inodeName.c_str(),
-                  &placeholderInfo,
-                  sizeof(placeholderInfo));
+              HRESULT result;
+              if (symlinksSupported() &&
+                  lookupResult.symlinkDestination.has_value()) {
+                std::string content = lookupResult.symlinkDestination.value();
+                std::wstring wcontent =
+                    std::wstring(content.begin(), content.end());
+                auto targetName = std::wstring(content.begin(), content.end());
+                _PRJ_EXTENDED_INFO extInfo;
+                extInfo.Symlink.TargetName = targetName.c_str();
+                extInfo.InfoType =
+                    _PRJ_EXT_INFO_TYPE::PRJ_EXT_INFO_TYPE_SYMLINK;
+                extInfo.NextInfoOffset = 0;
+                result = PrjWritePlaceholderInfo2(
+                    virtualizationContext,
+                    inodeName.c_str(),
+                    &placeholderInfo,
+                    sizeof(placeholderInfo),
+                    &extInfo);
+              } else {
+                result = PrjWritePlaceholderInfo(
+                    virtualizationContext,
+                    inodeName.c_str(),
+                    &placeholderInfo,
+                    sizeof(placeholderInfo));
+              }
 
               if (FAILED(result)) {
                 return makeImmediateFuture<folly::Unit>(
@@ -1351,6 +1413,10 @@ folly::Future<FsChannel::StopFuture> PrjfsChannel::initialize() {
     throw makeHResultErrorExplicit(result, "Failed to start the mount point");
   }
 
+  if (enableSymlinks_) {
+    getInner()->initializeSymlinkSupport();
+  }
+
   getInner()->setMountChannel(mountChannel);
 
   // On Windows, negative path cache is kept between channels. Invalidating here
@@ -1394,7 +1460,7 @@ FsChannelInfo PrjfsChannel::StopData::extractTakeoverInfo() {
   return ProjFsChannelData{};
 }
 
-folly::SemiFuture<folly::Unit> PrjfsChannel::stop() {
+folly::SemiFuture<folly::Unit> PrjfsChannel::unmount() {
   XLOG(INFO) << "Stopping PrjfsChannel for: " << mountPath_;
   XCHECK(!stopPromise_.isFulfilled());
 
@@ -1536,6 +1602,25 @@ void PrjfsChannel::flushNegativePathCache() {
 
     XLOGF(DBG6, "Flushed {} entries", numFlushed);
   }
+}
+
+void PrjfsChannelInner::initializeSymlinkSupport() {
+  if (placeholderExtendedInfo2_ == nullptr) {
+    placeholderExtendedInfo2_ = (PPWPI2)GetProcAddress(
+        GetModuleHandle(TEXT("ProjectedFSLib.dll")),
+        "PrjWritePlaceholderInfo2");
+  }
+  if (prjFillDirEntryBuffer2_ == nullptr) {
+    prjFillDirEntryBuffer2_ = (PPFDEB2)GetProcAddress(
+        GetModuleHandle(TEXT("ProjectedFSLib.dll")), "PrjFillDirEntryBuffer2");
+  }
+  if (placeholderExtendedInfo2_ == nullptr ||
+      prjFillDirEntryBuffer2_ == nullptr) {
+    throw makeHResultErrorExplicit(
+        255,
+        "Failed to start the mount point: support for symlink requested but PrjFS does not support symlinks in the current system");
+  }
+  symlinksSupported_ = true;
 }
 
 } // namespace facebook::eden

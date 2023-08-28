@@ -21,8 +21,15 @@ class OSFS(ShellFS):
         path = self._absjoin(path)
         if "b" not in mode:
             mode += "b"
-        # pyre-fixme[7]: Expected `BinaryIO` but got `IO[typing.Any]`.
-        return open(path, mode)
+        try:
+            # pyre-fixme[7]: Expected `BinaryIO` but got `IO[typing.Any]`.
+            return open(path, mode)
+        except NotADirectoryError:
+            raise
+        except FileNotFoundError:
+            if os.name == "nt" and not os.path.isdir(os.path.dirname(path)):
+                raise NotADirectoryError
+            raise
 
     def glob(self, pat: str) -> List[str]:
         prefix = self._absjoin("")
@@ -101,11 +108,21 @@ class OSFS(ShellFS):
             shutil.copytree(src, dst, symlinks=True)
 
     def link(self, src: str, dst: str):
+        if os.name == "nt":
+            src = src.replace("/", "\\")
         src = self._absjoin(src)
         dst = self._absjoin(dst)
         os.link(src, dst)
 
+    def readlink(self, slink: str) -> str:
+        target = os.readlink(self._absjoin(slink))
+        if os.name == "nt":
+            target = target.replace("\\", "/")
+        return target
+
     def symlink(self, src: str, dst: str):
+        if os.name == "nt":
+            src = src.replace("/", "\\")
         dst = self._absjoin(dst)
         os.symlink(src, dst)
 

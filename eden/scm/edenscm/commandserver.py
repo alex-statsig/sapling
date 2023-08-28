@@ -48,7 +48,7 @@ def log(*args):
     logfile.flush()
 
 
-class channeledoutput(object):
+class channeledoutput:
     """
     Write data to out in the following format:
 
@@ -79,7 +79,7 @@ class channeledoutput(object):
         return getattr(self.out, attr)
 
 
-class channeledinput(object):
+class channeledinput:
     """
     Read data from in_.
 
@@ -164,7 +164,7 @@ class channeledinput(object):
         return getattr(self.in_, attr)
 
 
-class server(object):
+class server:
     """
     Listens for commands on fin, runs them and writes the output on a channel
     based stream to fout.
@@ -261,7 +261,7 @@ class server(object):
             # any kind of interaction must use server channels, but chg may
             # replace channels by fully functional tty files. so nontty is
             # enforced only if cin is a channel.
-            if not util.safehasattr(self.cin, "fileno"):
+            if not hasattr(self.cin, "fileno"):
                 ui.setconfig("ui", "nontty", "true", "commandserver")
 
         req = dispatch.request(
@@ -308,7 +308,7 @@ class server(object):
         if versionmod:
             hellomsg += "\n"
             hellomsg += "versionhash: %s" % versionmod.versionhash
-        if util.safehasattr(os, "getpgid"):
+        if hasattr(os, "getpgid"):
             hellomsg += "\n"
             hellomsg += "pgid: %d" % os.getpgid(0)
         try:
@@ -358,7 +358,7 @@ def _restoreio(ui: "Any", fin: "BinaryIO", fout: "BinaryIO") -> None:
             f.close()
 
 
-class pipeservice(object):
+class pipeservice:
     def __init__(self, ui, repo, opts):
         self.ui = ui
         self.repo = repo
@@ -437,7 +437,7 @@ def _serverequest(ui, repo, conn, createcmdserver):
                 raise
 
 
-class unixservicehandler(object):
+class unixservicehandler:
     """Set of pluggable operations for unix-mode services
 
     Almost all methods except for createcmdserver() are called in the main
@@ -471,7 +471,7 @@ class unixservicehandler(object):
         return server(self.ui, repo, fin, fout)
 
 
-class unixforkingservice(object):
+class unixforkingservice:
     """
     Listens on unix domain socket and forks server per connection
     """
@@ -480,7 +480,7 @@ class unixforkingservice(object):
         self.ui = ui
         self.repo = repo
         self.address = opts["address"]
-        if not util.safehasattr(socket, "AF_UNIX"):
+        if not hasattr(socket, "AF_UNIX"):
             raise error.Abort(_("unsupported platform"))
         if not self.address:
             raise error.Abort(_("no socket path specified with --address"))
@@ -503,7 +503,7 @@ class unixforkingservice(object):
             flags |= fcntl.FD_CLOEXEC
             fcntl.fcntl(self._sock.fileno(), fcntl.F_SETFD, flags)
         self._servicehandler.bindsocket(self._sock, self.address)
-        if util.safehasattr(util, "unblocksignal"):
+        if hasattr(util, "unblocksignal"):
             util.unblocksignal(signal.SIGCHLD)
         o = util.signal(signal.SIGCHLD, self._sigchldhandler)
         self._oldsigchldhandler = o
@@ -604,10 +604,13 @@ class unixforkingservice(object):
             _serverequest(self.ui, self.repo, conn, h.createcmdserver)
         finally:
             # Explicitly disable progress. The progress is cleared on dropping
-            # IO in hgmain. However, that "drop" logic does not run with
+            # IO in hgmain. However, that "drop" logic *might* not run with
             # os._exit here. So let's explicitly clear the progress before
             # os._exit.
-            util.mainio.disable_progress()
+            try:
+                util.mainio.disable_progress()
+            except Exception:
+                pass
             # os._exit bypasses Rust `atexit::drop_queued`. Call `drop_queued`
             # explicitly.
             bindings.atexit.drop_queued()

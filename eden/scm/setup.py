@@ -278,7 +278,7 @@ def runcmd(cmd, env):
     return p.returncode, out, err
 
 
-class hgcommand(object):
+class hgcommand:
     def __init__(self, cmd, env):
         self.cmd = cmd
         self.env = env
@@ -308,6 +308,9 @@ def filterhgerr(err):
             and not e.startswith(b"warning: Not importing")
             and not e.startswith(b"obsolete feature not enabled")
             and not e.startswith(b"devel-warn:")
+            # Ignore hints from building hg with an old hg
+            and not e.startswith(b"hint[old-version]")
+            and not e.startswith(b"hint[hint-ack]")
         )
     ]
     return b"\n".join(b"  " + e for e in err)
@@ -553,7 +556,7 @@ if needbuildinfo:
     buildinfocpath = writebuildinfoc()
 
 
-class asset(object):
+class asset:
     def __init__(self, name=None, url=None, destdir=None, version=0):
         """Declare an asset to download
 
@@ -1682,7 +1685,7 @@ except ImportError:
     # the cygwinccompiler package is not available on some Python
     # distributions like the ones from the optware project for Synology
     # DiskStation boxes
-    class HackedMingw32CCompiler(object):
+    class HackedMingw32CCompiler:
         pass
 
 

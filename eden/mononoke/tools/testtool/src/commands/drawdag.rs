@@ -8,28 +8,15 @@
 //! DrawDAG for Integration Tests
 //!
 //! A DrawDAG specification consists of an ASCII graph (either left-to-right
-//! or bottom-to-top), and a series of comments that define additional
-//! properties for each commit.
+//! or bottom-to-top), and a series of comments that define actions that apply
+//! to that graph.
 //!
-//! Valid properties are:
+//! See documentation of `Action` for actions that affect the repository, and
+//! `ChangeAction` for actions that change commits.
 //!
-//! * Set a known changeset id for an already-existing commit
-//!     # exists: COMMIT id
-//!
-//! * Set a bookmark on a commit
-//!     # bookmark: COMMIT name
-//!
-//! * Set the content of a file.
-//!     # modify: COMMIT path/to/file "content"
-//!
-//! * Mark a file as deleted.
-//!     # delete: COMMIT path/to/file
-//!
-//! * Forget file that was about to be added (useful for getting rid of files
-//!   that are added by default):
-//!     # forget: COMMIT path/to/file
-//!
-//! Paths can be surrounded by quotes if they contain special characters.
+//! Values that contain special characters can be surrounded by quotes.
+//! Values that require binary data can prefix a hex string with `&`, e.g.
+//! `&face` becomes a two byte string with the values `FA CE`.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -62,6 +49,7 @@ use mononoke_app::args::RepoArgs;
 use mononoke_app::MononokeApp;
 use mononoke_types::ChangesetId;
 use mononoke_types::DateTime;
+use mononoke_types::FileType;
 use repo_derived_data::RepoDerivedDataRef;
 use skeleton_manifest::RootSkeletonManifestId;
 use tests_utils::drawdag::extend_from_dag_with_changes;
@@ -91,50 +79,77 @@ pub struct CommandArgs {
     print_hg_hashes: bool,
 }
 
+/// An action that affects the graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Action {
+    /// Set a known changeset id for an already-existing commit.  This commit
+    /// will not be created, but other commits in the graph that relate to it
+    /// will be related to this existing commit.
+    ///
+    ///     # exists: COMMIT id
     Exists { name: String, id: ChangesetId },
+    /// Set a bookmark on a commit
+    ///
+    ///     # bookmark: COMMIT name
     Bookmark { name: String, bookmark: BookmarkKey },
+    /// Change a commit
     Change { name: String, change: ChangeAction },
 }
 
+/// An action that changes one of the commits in the graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ChangeAction {
+    /// Set the content of a file (optionally with file type).
+    ///
+    ///     # modify: COMMIT path/to/file [TYPE] "content"
     Modify {
         path: Vec<u8>,
+        file_type: FileType,
         content: Vec<u8>,
     },
-    Delete {
-        path: Vec<u8>,
-    },
-    Forget {
-        path: Vec<u8>,
-    },
-    Extra {
-        key: String,
-        value: Vec<u8>,
-    },
-    Message {
-        message: String,
-    },
-    Author {
-        author: String,
-    },
-    AuthorDate {
-        author_date: DateTime,
-    },
-    Committer {
-        committer: String,
-    },
-    CommitterDate {
-        committer_date: DateTime,
-    },
+    /// Mark a file as deleted.
+    ///
+    ///     # delete: COMMIT path/to/file
+    Delete { path: Vec<u8> },
+    /// Forget file that was about to be added (useful for getting rid of files
+    /// that are added by default).
+    ///
+    ///     # forget: COMMIT path/to/file
+    Forget { path: Vec<u8> },
+    /// Mark a file as a copy of another file (optionally with file type).
+    ///
+    ///     # copy: COMMIT path/to/file [TYPE] "content" PARENT_COMMIT_ID path/copied/from
     Copy {
         path: Vec<u8>,
+        file_type: FileType,
         content: Vec<u8>,
         parent: String,
         parent_path: Vec<u8>,
     },
+    /// Set a Mercurial commit extra on a commit.
+    ///
+    ///     # extra: COMMIT "key" "value"
+    Extra { key: String, value: Vec<u8> },
+    /// Set the commit message.
+    ///
+    ///     # message: COMMIT "message"
+    Message { message: String },
+    /// Set the author.
+    ///
+    ///     # author: COMMIT "Author Name <email@domain>"
+    Author { author: String },
+    /// Set the author date (in RFC3339 format).
+    ///
+    ///     # author_date: COMMIT "YYYY-mm-ddTHH:MM:SS+ZZ:ZZ"
+    AuthorDate { author_date: DateTime },
+    /// Set the committer.
+    ///
+    ///     # comitter: COMMIT "Committer Name <email@domain>"
+    Committer { committer: String },
+    /// Set the committer date (in RFC3339 format).
+    ///
+    ///     # committer_date: COMMIT "YYYY-mm-ddTHH:MM:SS+ZZ:ZZ"
+    CommitterDate { committer_date: DateTime },
 }
 
 impl Action {
@@ -193,13 +208,21 @@ impl Action {
                         change: ChangeAction::CommitterDate { committer_date },
                     })
                 }
-                ("modify", [name, path, content]) => {
+                ("modify", [name, path, rest @ .., content]) if rest.len() < 2 => {
                     let name = name.to_string()?;
                     let path = path.to_bytes();
+                    let file_type = match rest.get(0) {
+                        Some(file_type) => file_type.to_string()?.parse()?,
+                        None => FileType::Regular,
+                    };
                     let content = content.to_bytes();
                     Ok(Action::Change {
                         name,
-                        change: ChangeAction::Modify { path, content },
+                        change: ChangeAction::Modify {
+                            path,
+                            file_type,
+                            content,
+                        },
                     })
                 }
                 ("delete", [name, path]) => {
@@ -227,9 +250,15 @@ impl Action {
                         change: ChangeAction::Extra { key, value },
                     })
                 }
-                ("copy", [name, path, content, parent, parent_path]) => {
+                ("copy", [name, path, rest @ .., content, parent, parent_path])
+                    if rest.len() < 2 =>
+                {
                     let name = name.to_string()?;
                     let path = path.to_bytes();
+                    let file_type = match rest.get(0) {
+                        Some(file_type) => file_type.to_string()?.parse()?,
+                        None => FileType::Regular,
+                    };
                     let content = content.to_bytes();
                     let parent = parent.to_string()?;
                     let parent_path = parent_path.to_bytes();
@@ -237,6 +266,7 @@ impl Action {
                         name,
                         change: ChangeAction::Copy {
                             path,
+                            file_type,
                             content,
                             parent,
                             parent_path,
@@ -295,7 +325,7 @@ impl ActionArg {
     }
 
     fn parse_args(args: &str) -> Result<Vec<Self>> {
-        let mut iter = args.trim().chars();
+        let mut iter = args.trim().chars().peekable();
         let mut args = Vec::new();
         let mut arg = ActionArg::new();
         let mut in_quotes = false;
@@ -330,6 +360,11 @@ impl ActionArg {
                     }
                     ch if ch.is_alphanumeric() || "_-./".contains(ch) => {
                         arg.push(ch);
+                    }
+                    '&' => {
+                        while iter.peek().map_or(false, |ch| !ch.is_whitespace()) {
+                            arg.push_hex(&mut iter)?;
+                        }
                     }
                     ch => return Err(anyhow!("Unexpected character: '{}'", ch)),
                 }
@@ -502,7 +537,12 @@ fn apply_changes<'a>(
 ) -> CreateCommitContext<'a, BlobRepo> {
     for change in changes {
         match change {
-            ChangeAction::Modify { path, content, .. } => c = c.add_file(path.as_slice(), content),
+            ChangeAction::Modify {
+                path,
+                file_type,
+                content,
+                ..
+            } => c = c.add_file_with_type(path.as_slice(), content, file_type),
             ChangeAction::Delete { path, .. } => c = c.delete_file(path.as_slice()),
             ChangeAction::Forget { path, .. } => c = c.forget_file(path.as_slice()),
             ChangeAction::Extra { key, value, .. } => c = c.add_extra(key, value),
@@ -606,7 +646,19 @@ mod test {
                 name: "_1".to_string(),
                 change: ChangeAction::Modify {
                     path: b"path/to/file".to_vec(),
+                    file_type: FileType::Regular,
                     content: b"this has \xaa content\n\ton \x02 lines with \"quotes\"".to_vec(),
+                }
+            }
+        );
+        assert_eq!(
+            Action::new("modify: _1 path/to/binary/file exec &Faceb00c")?,
+            Action::Change {
+                name: "_1".to_string(),
+                change: ChangeAction::Modify {
+                    path: b"path/to/binary/file".to_vec(),
+                    file_type: FileType::Executable,
+                    content: b"\xfa\xce\xb0\x0c".to_vec(),
                 }
             }
         );

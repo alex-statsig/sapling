@@ -62,7 +62,7 @@ def makemutationstore(repo):
     return mutationstore.mutationstore(repo.svfs.join("mutation"))
 
 
-class bundlemutationstore(object):
+class bundlemutationstore:
     def __init__(self, bundlerepo):
         self._entries = {}
         self._splitheads = {}
@@ -255,7 +255,7 @@ def allsuccessors(repo, nodes, startdepth=None, stopdepth=None):
         nextlevel = set()
 
 
-class obsoletecache(object):
+class obsoletecache:
     def __init__(self):
         # Set of commits that are known to be obsolete for each filter level.
         self.obsolete = defaultdict(set)
@@ -356,19 +356,19 @@ class obsoletecache(object):
 
 
 def isobsolete(repo, node):
-    if not util.safehasattr(repo, "_mutationobsolete"):
+    if not hasattr(repo, "_mutationobsolete"):
         repo._mutationobsolete = obsoletecache()
     return repo._mutationobsolete.isobsolete(repo, node)
 
 
 def obsoletenodes(repo):
-    if not util.safehasattr(repo, "_mutationobsolete"):
+    if not hasattr(repo, "_mutationobsolete"):
         repo._mutationobsolete = obsoletecache()
     return repo._mutationobsolete.obsoletenodes(repo)
 
 
 def clearobsoletecache(repo) -> None:
-    if util.safehasattr(repo, "_mutationobsolete"):
+    if hasattr(repo, "_mutationobsolete"):
         del repo._mutationobsolete
 
 
@@ -611,22 +611,29 @@ def successorssets(repo, startnode, closest: bool = False, cache=None):
     return succsets
 
 
-def foreground(repo, nodes):
-    """Returns all nodes in the "foreground" of the given nodes.
+def foreground_contains(repo, old_nodes, new_node):
+    """Test if `ancestors(predecessors(new_node))` overlap with `old_nodes`.
 
-    The foreground of a commit is the transitive closure of all descendants
-    and successors of the commit.
+    This is not quite as the same as the original 'foreground', but is much
+    faster since we avoid passing a large set to `predecessors` or
+    `successors`.
     """
-    unfi = repo
-    nm = unfi.changelog.nodemap
-    foreground = set(nodes)
-    newnodes = set(nodes)
-    while newnodes:
-        newnodes.update(n for n in allsuccessors(repo, newnodes) if n in nm)
-        newnodes.update(unfi.nodes("%ln::", newnodes))
-        newnodes.difference_update(foreground)
-        foreground.update(newnodes)
-    return foreground
+    # First, check without calculating `predecessors`.
+    ancestor_nodes = repo.dageval(lambda: ancestors([new_node]))
+    if any(n in ancestor_nodes for n in old_nodes):
+        return True
+    # Then, calculate predecessors.
+    obsdag = getdag(repo, new_node, successors=False)
+    predecessor_nodes = obsdag.ancestors([new_node])
+    ancestor_nodes = repo.dageval(lambda: ancestors([new_node]))
+    if any(n in ancestor_nodes for n in old_nodes):
+        return True
+    # For performance we don't check transitive closures like
+    # ancestors(predecessors) or predecessors(ancestors(predecessors)).
+    # If you have to check them, try to limit the commits passed to
+    # predecessors(), like, maybe, passing old_nodes::predecessors(new_node)
+    # to ancestors().
+    return False
 
 
 def toposortrevs(repo, revs, predmap):

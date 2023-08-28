@@ -8,6 +8,7 @@
 mod error;
 mod exact_matcher;
 mod gitignore_matcher;
+mod hinted_matcher;
 mod matcher;
 mod pattern;
 mod regex_matcher;
@@ -23,7 +24,10 @@ use types::RepoPath;
 pub use crate::error::Error;
 pub use crate::exact_matcher::ExactMatcher;
 pub use crate::gitignore_matcher::GitignoreMatcher;
+pub use crate::hinted_matcher::HintedMatcher;
 pub use crate::matcher::build_matcher;
+pub use crate::matcher::cli_matcher;
+pub use crate::matcher::cli_matcher_with_filesets;
 pub use crate::pattern::build_patterns;
 pub use crate::pattern::split_pattern;
 pub use crate::pattern::PatternKind;
@@ -45,6 +49,8 @@ pub trait Matcher {
     /// it has to be removed.
     fn matches_file(&self, path: &RepoPath) -> Result<bool>;
 }
+
+pub type DynMatcher = Arc<dyn 'static + Matcher + Send + Sync>;
 
 /// Allows for fast code paths when dealing with patterns selecting directories.
 /// `Everything` means that all the files in the subtree of the given directory need to be part
@@ -262,6 +268,30 @@ impl Matcher for IntersectMatcher {
             matched = true;
         }
         Ok(matched)
+    }
+}
+
+pub struct NegateMatcher {
+    matcher: Arc<dyn 'static + Matcher + Send + Sync>,
+}
+
+impl NegateMatcher {
+    pub fn new(matcher: Arc<dyn 'static + Matcher + Send + Sync>) -> Self {
+        Self { matcher }
+    }
+}
+
+impl Matcher for NegateMatcher {
+    fn matches_directory(&self, path: &RepoPath) -> Result<DirectoryMatch> {
+        self.matcher.matches_directory(path).map(|m| match m {
+            DirectoryMatch::Everything => DirectoryMatch::Nothing,
+            DirectoryMatch::Nothing => DirectoryMatch::Everything,
+            DirectoryMatch::ShouldTraverse => DirectoryMatch::ShouldTraverse,
+        })
+    }
+
+    fn matches_file(&self, path: &RepoPath) -> Result<bool> {
+        self.matcher.matches_file(path).map(|b| !b)
     }
 }
 

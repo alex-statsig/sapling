@@ -5,7 +5,7 @@
  * GNU General Public License version 2.
  */
 
-#include "HgBackingStore.h"
+#include "eden/fs/store/hg/HgBackingStore.h"
 
 #include <memory>
 
@@ -205,13 +205,15 @@ HgBackingStore::HgBackingStore(
 
 HgBackingStore::~HgBackingStore() = default;
 
-ImmediateFuture<TreePtr> HgBackingStore::getRootTree(const RootId& rootId) {
+ImmediateFuture<BackingStore::GetRootTreeResult> HgBackingStore::getRootTree(
+    const RootId& rootId) {
   ObjectId commitId = hashFromRootId(rootId);
 
   return localStore_
       ->getImmediateFuture(KeySpace::HgCommitToTreeFamily, commitId)
       .thenValue(
-          [this, commitId](StoreResult result) -> folly::SemiFuture<TreePtr> {
+          [this, commitId](StoreResult result)
+              -> folly::SemiFuture<BackingStore::GetRootTreeResult> {
             if (!result.isValid()) {
               return importTreeManifest(commitId).thenValue(
                   [this, commitId](TreePtr rootTree) {
@@ -222,7 +224,8 @@ ImmediateFuture<TreePtr> HgBackingStore::getRootTree(const RootId& rootId) {
                         KeySpace::HgCommitToTreeFamily,
                         commitId,
                         rootTree->getHash().getBytes());
-                    return rootTree;
+                    return BackingStore::GetRootTreeResult{
+                        rootTree, rootTree->getHash()};
                   });
             }
 
@@ -231,7 +234,10 @@ ImmediateFuture<TreePtr> HgBackingStore::getRootTree(const RootId& rootId) {
                 ObjectId{result.bytes()},
                 "getRootTree",
                 *stats_);
-            return importTreeManifestImpl(rootTreeHash.revHash());
+            return importTreeManifestImpl(rootTreeHash.revHash())
+                .thenValue([](TreePtr tree) {
+                  return BackingStore::GetRootTreeResult{tree, tree->getHash()};
+                });
           });
 }
 
@@ -284,29 +290,25 @@ folly::Future<TreePtr> HgBackingStore::fetchTreeFromImporter(
     ObjectId edenTreeID,
     RelativePath path,
     std::shared_ptr<LocalStore::WriteBatch> writeBatch) {
-  auto fut = folly::via(
-                 importThreadPool_.get(),
-                 [this,
-                  path,
-                  manifestNode,
-                  &liveImportTreeWatches = liveImportTreeWatches_] {
-                   Importer& importer = getThreadLocalImporter();
-                   folly::stop_watch<std::chrono::milliseconds> watch;
-                   RequestMetricsScope queueTracker{&liveImportTreeWatches};
-                   if (logger_) {
-                     logger_->logEvent(EdenApiMiss{
-                         repoName_,
-                         EdenApiMiss::Tree,
-                         path.asString(),
-                         manifestNode.toString(),
-                     });
-                   }
-                   auto serializedTree = importer.fetchTree(path, manifestNode);
-                   stats_->addDuration(
-                       &HgBackingStoreStats::importTree, watch.elapsed());
-                   return serializedTree;
-                 })
-                 .via(serverThreadPool_);
+  auto fut =
+      folly::via(
+          importThreadPool_.get(),
+          [this,
+           path,
+           manifestNode,
+           &liveImportTreeWatches = liveImportTreeWatches_] {
+            Importer& importer = getThreadLocalImporter();
+            folly::stop_watch<std::chrono::milliseconds> watch;
+            RequestMetricsScope queueTracker{&liveImportTreeWatches};
+            if (logger_) {
+              logger_->logEvent(EdenApiMiss{repoName_, EdenApiMiss::Tree});
+            }
+            auto serializedTree = importer.fetchTree(path, manifestNode);
+            stats_->addDuration(
+                &HgBackingStoreStats::importTree, watch.elapsed());
+            return serializedTree;
+          })
+          .via(serverThreadPool_);
 
   return std::move(fut).thenTry([this,
                                  ownedPath = std::move(path),
@@ -547,12 +549,7 @@ SemiFuture<BlobPtr> HgBackingStore::fetchBlobFromHgImporter(
         folly::stop_watch<std::chrono::milliseconds> watch;
         RequestMetricsScope queueTracker{&liveImportBlobWatches};
         if (logger_) {
-          logger_->logEvent(EdenApiMiss{
-              repoName_,
-              EdenApiMiss::Blob,
-              hgInfo.path().asString(),
-              hgInfo.revHash().toString(),
-          });
+          logger_->logEvent(EdenApiMiss{repoName_, EdenApiMiss::Blob});
         }
         auto blob =
             importer.importFileContents(hgInfo.path(), hgInfo.revHash());

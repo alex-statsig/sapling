@@ -93,7 +93,7 @@ def _newchgui(srcui, csystem, attachio):
     return chgui(srcui)
 
 
-class channeledsystem(object):
+class channeledsystem:
     """Propagate ui.system() and ui._runpager() requests to the chg client"""
 
     def __init__(self, in_: "BinaryIO", out: "BinaryIO") -> None:
@@ -293,7 +293,7 @@ class chgcmdserver(commandserver.server):
         }
     )
 
-    if util.safehasattr(util, "setprocname"):
+    if hasattr(util, "setprocname"):
 
         def setprocname(self):
             """Change process title"""
@@ -318,7 +318,7 @@ def _realaddress(address: str) -> str:
     return os.path.join(dirname, basename)
 
 
-class chgunixservicehandler(object):
+class chgunixservicehandler:
     """Set of operations for chg services"""
 
     pollinterval = 1  # [sec]

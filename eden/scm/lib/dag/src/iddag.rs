@@ -136,10 +136,11 @@ impl IdDag<InProcessStore> {
 
 impl<Store: IdDagStore> IdDag<Store> {
     pub(crate) fn open_from_store(store: Store) -> Result<Self> {
+        let version = store.verlink();
         let dag = Self {
             store,
             new_seg_size: default_seg_size(),
-            version: VerLink::new(),
+            version,
         };
         Ok(dag)
     }
@@ -1757,13 +1758,6 @@ impl<Store: IdDagStore> IdDag<Store> {
         Ok(parents)
     }
 
-    /// Remove all non master Group identifiers from the DAG.
-    pub fn remove_non_master(&mut self) -> Result<()> {
-        // Non-append-only change. Use a new incompatible version.
-        self.version = VerLink::new();
-        self.store.remove_non_master()
-    }
-
     /// Remove `set` and their descendants. Return `descendents(set)`.
     ///
     /// The returned `descendants(set)` is usually used to remove
@@ -1861,7 +1855,7 @@ impl<Store: IdDagStore> IdDag<Store> {
     }
 }
 
-impl<Store: Persist> Persist for IdDag<Store> {
+impl<Store: Persist + IdDagStore> Persist for IdDag<Store> {
     type Lock = <Store as Persist>::Lock;
 
     fn lock(&mut self) -> Result<Self::Lock> {
@@ -1873,7 +1867,9 @@ impl<Store: Persist> Persist for IdDag<Store> {
     }
 
     fn persist(&mut self, lock: &Self::Lock) -> Result<()> {
-        self.store.persist(lock)
+        self.store.persist(lock)?;
+        self.store.cache_verlink(&self.version);
+        Ok(())
     }
 }
 

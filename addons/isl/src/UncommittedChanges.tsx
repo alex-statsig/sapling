@@ -8,7 +8,7 @@
 import type {UseUncommittedSelection} from './partialSelection';
 import type {PathTree} from './pathTree';
 import type {ChangedFile, ChangedFileType, MergeConflicts, RepoRelativePath} from './types';
-import type {MutableRefObject} from 'react';
+import type {MutableRefObject, ReactNode} from 'react';
 import type {Comparison} from 'shared/Comparison';
 
 import {
@@ -28,16 +28,18 @@ import {
 } from './CommitInfoView/CommitMessageFields';
 import {OpenComparisonViewButton} from './ComparisonView/OpenComparisonViewButton';
 import {ErrorNotice} from './ErrorNotice';
+import {PartialFileSelection} from './PartialFileSelection';
+import {SuspenseBoundary} from './SuspenseBoundary';
 import {DOCUMENTATION_DELAY, Tooltip} from './Tooltip';
 import {islDrawerState} from './drawerState';
 import {T, t} from './i18n';
 import {AbortMergeOperation} from './operations/AbortMergeOperation';
 import {AddOperation} from './operations/AddOperation';
 import {AddRemoveOperation} from './operations/AddRemoveOperation';
-import {AmendOperation} from './operations/AmendOperation';
-import {CommitOperation} from './operations/CommitOperation';
+import {getAmendOperation} from './operations/AmendOperation';
+import {getCommitOperation} from './operations/CommitOperation';
 import {ContinueOperation} from './operations/ContinueMergeOperation';
-import {DiscardOperation} from './operations/DiscardOperation';
+import {DiscardOperation, PartialDiscardOperation} from './operations/DiscardOperation';
 import {ForgetOperation} from './operations/ForgetOperation';
 import {PurgeOperation} from './operations/PurgeOperation';
 import {ResolveOperation, ResolveTool} from './operations/ResolveOperation';
@@ -52,19 +54,22 @@ import {
 } from './previews';
 import {selectedCommits} from './selection';
 import {
+  hasExperimentalFeatures,
   latestHeadCommit,
   operationList,
   uncommittedChangesFetchError,
   useRunOperation,
 } from './serverAPIState';
+import {usePromise} from './usePromise';
 import {VSCodeButton, VSCodeCheckbox, VSCodeTextField} from '@vscode/webview-ui-toolkit/react';
-import {useRef, useState} from 'react';
+import React, {useRef, useState} from 'react';
 import {useRecoilCallback, useRecoilValue} from 'recoil';
-import {revsetForComparison, ComparisonType} from 'shared/Comparison';
+import {labelForComparison, revsetForComparison, ComparisonType} from 'shared/Comparison';
+import {useContextMenu} from 'shared/ContextMenu';
 import {Icon} from 'shared/Icon';
 import {useDeepMemo} from 'shared/hooks';
 import {minimalDisambiguousPaths} from 'shared/minimalDisambiguousPaths';
-import {notEmpty} from 'shared/utils';
+import {basename, notEmpty} from 'shared/utils';
 
 import './UncommittedChanges.css';
 
@@ -252,10 +257,28 @@ function File({
   // Visually show renamed files as if they were modified, even though sl treats them as added.
   const [statusName, icon] = nameAndIconForFileStatus[file.visualStatus];
 
+  const contextMenu = useContextMenu(() => {
+    const options = [
+      {label: t('Copy File Path'), onClick: () => platform.clipboardCopy(file.path)},
+      {label: t('Copy Filename'), onClick: () => platform.clipboardCopy(basename(file.path))},
+      {label: t('Open File'), onClick: () => platform.openFile(file.path)},
+    ];
+    if (platform.openDiff != null) {
+      options.push({
+        label: t('Open Diff View ($comparison)', {
+          replace: {$comparison: labelForComparison(comparison)},
+        }),
+        onClick: () => platform.openDiff?.(file.path, comparison),
+      });
+    }
+    return options;
+  });
+
   return (
     <div
       className={`changed-file file-${statusName}`}
       data-testid={`changed-file-${file.path}`}
+      onContextMenu={contextMenu}
       key={file.path}
       tabIndex={0}
       onKeyPress={e => {
@@ -271,23 +294,44 @@ function File({
         }}>
         <Icon icon={icon} />
         <Tooltip title={file.tooltip} delayMs={2_000} placement="right">
-          <span className="changed-file-path-text">
-            {displayType === 'fish'
-              ? file.path
-                  .split('/')
-                  .map((a, i, arr) => (i === arr.length - 1 ? a : a[0]))
-                  .join('/')
-              : displayType === 'fullPaths'
-              ? file.path
-              : displayType === 'tree'
-              ? file.path.slice(file.path.lastIndexOf('/') + 1)
-              : file.label}
+          <span
+            className="changed-file-path-text"
+            onCopy={e => {
+              const selection = document.getSelection();
+              if (selection) {
+                // we inserted LTR markers, remove them again on copy
+                e.clipboardData.setData('text/plain', selection.toString().replace(/\u200E/g, ''));
+                e.preventDefault();
+              }
+            }}>
+            {escapeForRTL(
+              displayType === 'fish'
+                ? file.path
+                    .split('/')
+                    .map((a, i, arr) => (i === arr.length - 1 ? a : a[0]))
+                    .join('/')
+                : displayType === 'fullPaths'
+                ? file.path
+                : displayType === 'tree'
+                ? file.path.slice(file.path.lastIndexOf('/') + 1)
+                : file.label,
+            )}
           </span>
         </Tooltip>
       </span>
       <FileActions file={file} comparison={comparison} />
     </div>
   );
+}
+
+/**
+ * We render file paths with CSS text-direction: rtl,
+ * which allows the ellipsis overflow to appear on the left.
+ * However, rtl can have weird effects, such as moving leading '.' to the end.
+ * To fix this, it's enough to add a left-to-right marker at the start of the path
+ */
+function escapeForRTL(s: string): ReactNode {
+  return '\u200E' + s;
 }
 
 function FileSelectionCheckbox({
@@ -306,9 +350,19 @@ function FileSelectionCheckbox({
       onClick={e => {
         const checked = (e.target as HTMLInputElement).checked;
         if (checked) {
-          selection.select(file.path);
+          if (file.renamedFrom != null) {
+            // Selecting a renamed file also selects the original, so they are committed/amended together
+            // the UI merges them visually anyway.
+            selection.select(file.renamedFrom, file.path);
+          } else {
+            selection.select(file.path);
+          }
         } else {
-          selection.deselect(file.path);
+          if (file.renamedFrom != null) {
+            selection.deselect(file.renamedFrom, file.path);
+          } else {
+            selection.deselect(file.path);
+          }
         }
       }}
     />
@@ -397,6 +451,19 @@ export function UncommittedChanges({place}: {place: 'main' | 'amend sidebar' | '
     </Tooltip>
   ) : null;
 
+  const onConfirmQuickCommit = () => {
+    const title =
+      (commitTitleRef.current as HTMLInputElement | null)?.value || t('Temporary Commit');
+    const hash = headCommit?.hash ?? '.';
+    const allFiles = uncommittedChanges.map(file => file.path);
+    const operation = getCommitOperation(title, hash, selection.selection, allFiles);
+    // TODO(quark): We need better invalidation for chunk selected files.
+    if (selection.hasChunkSelection()) {
+      selection.clear();
+    }
+    runOperation(operation);
+  };
+
   return (
     <div className="uncommitted-changes">
       {conflicts != null ? (
@@ -479,6 +546,11 @@ export function UncommittedChanges({place}: {place: 'main' | 'amend sidebar' | '
                       // ...and delete untracked files.
                       // Technically we only need to do the purge when we have untracked files, though there's a chance there's files we don't know about yet while status is running.
                       runOperation(new PurgeOperation());
+                    } else if (selection.hasChunkSelection()) {
+                      // TODO(quark): Make PartialDiscardOperation replace the above and below cases.
+                      const allFiles = uncommittedChanges.map(file => file.path);
+                      const operation = new PartialDiscardOperation(selection.selection, allFiles);
+                      runOperation(operation);
                     } else {
                       // only a subset of files selected -> we need to revert selected files individually
                       runOperation(new RevertOperation(selectedFiles));
@@ -516,26 +588,7 @@ export function UncommittedChanges({place}: {place: 'main' | 'amend sidebar' | '
                 appearance="icon"
                 disabled={noFilesSelected}
                 data-testid="quick-commit-button"
-                onClick={() => {
-                  const title =
-                    (commitTitleRef.current as HTMLInputElement | null)?.value ||
-                    t('Temporary Commit');
-                  const filesToCommit = allFilesSelected
-                    ? // all files
-                      undefined
-                    : // only files not unchecked
-                      uncommittedChanges
-                        .filter(file => selection.isFullyOrPartiallySelected(file.path))
-                        .map(file => file.path);
-                  // TODO(quark): [Commit] does not work for partial selection yet.
-                  runOperation(
-                    new CommitOperation(
-                      title, // just the title, no description / other fields
-                      headCommit?.hash ?? '',
-                      filesToCommit,
-                    ),
-                  );
-                }}>
+                onClick={onConfirmQuickCommit}>
                 <Icon slot="start" icon="plus" />
                 <T>Commit</T>
               </VSCodeButton>
@@ -543,6 +596,11 @@ export function UncommittedChanges({place}: {place: 'main' | 'amend sidebar' | '
                 data-testid="quick-commit-title"
                 placeholder="Title"
                 ref={commitTitleRef as MutableRefObject<null>}
+                onKeyPress={e => {
+                  if (e.key === 'Enter' && !(e.ctrlKey || e.metaKey || e.altKey || e.shiftKey)) {
+                    onConfirmQuickCommit();
+                  }
+                }}
               />
             </span>
             <VSCodeButton
@@ -559,18 +617,22 @@ export function UncommittedChanges({place}: {place: 'main' | 'amend sidebar' | '
             <div className="button-row">
               <VSCodeButton
                 appearance="icon"
-                disabled={noFilesSelected}
+                disabled={noFilesSelected || !headCommit}
                 data-testid="uncommitted-changes-quick-amend-button"
                 onClick={() => {
-                  const filesToCommit = allFilesSelected
-                    ? // all files
-                      undefined
-                    : // only files not unchecked
-                      uncommittedChanges
-                        .filter(file => selection.isFullyOrPartiallySelected(file.path))
-                        .map(file => file.path);
-                  // TODO(quark): [Amend] does not work for partial selection yet.
-                  runOperation(new AmendOperation(filesToCommit));
+                  const hash = headCommit?.hash ?? '.';
+                  const allFiles = uncommittedChanges.map(file => file.path);
+                  const operation = getAmendOperation(
+                    undefined,
+                    hash,
+                    selection.selection,
+                    allFiles,
+                  );
+                  // TODO(quark): We need better invalidation for chunk selected files.
+                  if (selection.hasChunkSelection()) {
+                    selection.clear();
+                  }
+                  runOperation(operation);
                 }}>
                 <Icon slot="start" icon="debug-step-into" />
                 <T>Amend</T>
@@ -615,6 +677,7 @@ function MergeConflictButtons({
   const isRunningAbort = !!useIsOperationRunningOrQueued(AbortMergeOperation);
   const shouldDisableButtons =
     isRunningContinue || isRunningAbort || justFinishedContinue || justFinishedAbort;
+
   return (
     <>
       <VSCodeButton
@@ -646,6 +709,9 @@ const revertableStatues = new Set(['M', 'R', '!']);
 const conflictStatuses = new Set<ChangedFileType>(['U', 'Resolved']);
 function FileActions({comparison, file}: {comparison: Comparison; file: UIChangedFile}) {
   const runOperation = useRunOperation();
+  const hasExperimental = useRecoilValue(hasExperimentalFeatures);
+  const conflicts = useRecoilValue(optimisticMergeConflicts);
+
   const actions: Array<React.ReactNode> = [];
 
   if (platform.openDiff != null && !conflictStatuses.has(file.status)) {
@@ -812,11 +878,50 @@ function FileActions({comparison, file}: {comparison: Comparison; file: UIChange
         </Tooltip>,
       );
     }
+
+    if (hasExperimental && conflicts == null) {
+      actions.push(<PartialSelectionAction file={file} key="partial-selection" />);
+    }
   }
   return (
     <div className="file-actions" data-testid="file-actions">
       {actions}
     </div>
+  );
+}
+
+function PartialSelectionAction({file}: {file: UIChangedFile}) {
+  const getPanel = () => {
+    return (
+      <SuspenseBoundary>
+        <PartialSelectionPanel file={file} />
+      </SuspenseBoundary>
+    );
+  };
+
+  return (
+    <Tooltip
+      title={t('Select partial changes')}
+      component={getPanel}
+      trigger="click"
+      placement="bottom">
+      <VSCodeButton className="file-show-on-hover" appearance="icon">
+        <Icon icon="diff" />
+      </VSCodeButton>
+    </Tooltip>
+  );
+}
+
+function PartialSelectionPanel({file}: {file: UIChangedFile}) {
+  const path = file.path;
+  const selection = useUncommittedSelection();
+  const chunkSelect = usePromise(selection.getChunkSelect(path));
+
+  return (
+    <PartialFileSelection
+      chunkSelection={chunkSelect}
+      setChunkSelection={state => selection.editChunkSelect(path, state)}
+    />
   );
 }
 

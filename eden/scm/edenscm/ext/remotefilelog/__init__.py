@@ -207,7 +207,7 @@ configitem("edenapi", "url", default=None)
 testedwith = "ships-with-fb-ext"
 
 repoclass = localrepo.localrepository
-if util.safehasattr(repoclass, "_basesupported"):
+if hasattr(repoclass, "_basesupported"):
     repoclass._basesupported.add(shallowrepo.requirement)
 else:
     # hg <= 2.7
@@ -220,7 +220,6 @@ def uisetup(ui):
     """
     hg.wirepeersetupfuncs.append(fileserverclient.peersetup)
 
-    extensions.wrapcommand(commands.table, "clone", cloneshallow)
     extensions.wrapcommand(commands.table, "debugindex", debugcommands.debugindex)
     extensions.wrapcommand(commands.table, "debugindexdot", debugcommands.debugindexdot)
     extensions.wrapcommand(commands.table, "log", log)
@@ -269,9 +268,9 @@ def wrappackers():
     changegroup.cg1packer = shallowbundle.shallowcg1packer
 
     packermap = None
-    if util.safehasattr(changegroup, "packermap"):
+    if hasattr(changegroup, "packermap"):
         packermap = changegroup.packermap
-    elif util.safehasattr(changegroup, "_packermap"):
+    elif hasattr(changegroup, "_packermap"):
         packermap = changegroup._packermap
 
     if packermap:
@@ -282,47 +281,6 @@ def wrappackers():
         packermap["01"] = (shallowbundle.shallowcg1packer, packermap01[1])
         packermap["02"] = (shallowbundle.shallowcg2packer, packermap02[1])
         packermap["03"] = (shallowbundle.shallowcg3packer, packermap03[1])
-
-
-def cloneshallow(orig, ui, source, *args, **opts):
-    # skip for (full) git repos
-    giturl = cloneuri.determine_git_uri(opts.get("git"), source)
-    if opts.get("shallow") and giturl is None:
-        repos = []
-
-        def pull_shallow(orig, self, *args, **kwargs):
-            repos.append(self)
-            # set up the client hooks so the post-clone update works
-            setupclient(self.ui, self)
-
-            if shallowrepo.requirement not in self.requirements:
-                self.requirements.add(shallowrepo.requirement)
-                self._writerequirements()
-
-            # Since setupclient hadn't been called, exchange.pull was not
-            # wrapped. So we need to manually invoke our version of it.
-            return exchangepull(orig, self, *args, **kwargs)
-
-        wrapfunction(exchange, "pull", pull_shallow)
-
-        if hasstreamclone:
-
-            def canperformstreamclone(orig, *args, **kwargs):
-                supported, requirements = orig(*args, **kwargs)
-                if requirements is not None:
-                    requirements.add(shallowrepo.requirement)
-                return supported, requirements
-
-            wrapfunction(streamclone, "canperformstreamclone", canperformstreamclone)
-        else:
-
-            def stream_in_shallow(orig, repo, remote, requirements):
-                requirements.add(shallowrepo.requirement)
-                return orig(repo, remote, requirements)
-
-            wrapfunction(localrepo.localrepository, "stream_in", stream_in_shallow)
-
-    return orig(ui, source, *args, **opts)
 
 
 def debugdatashallow(orig, *args, **kwds):
@@ -391,12 +349,12 @@ def onetimeclientsetup(ui):
         return
     clientonetime = True
 
-    if util.safehasattr(changegroup, "_addchangegroupfiles"):
+    if hasattr(changegroup, "_addchangegroupfiles"):
         fn = "_addchangegroupfiles"  # hg >= 3.6
     else:
         fn = "addchangegroupfiles"  # hg <= 3.5
     wrapfunction(changegroup, fn, shallowbundle.addchangegroupfiles)
-    if util.safehasattr(changegroup, "getchangegroup"):
+    if hasattr(changegroup, "getchangegroup"):
         wrapfunction(changegroup, "getchangegroup", shallowbundle.getchangegroup)
     else:
         wrapfunction(changegroup, "makechangegroup", shallowbundle.makechangegroup)
@@ -699,7 +657,7 @@ def onetimeclientsetup(ui):
 
     wrapfunction(patch, "trydiff", trydiff)
 
-    if util.safehasattr(cmdutil, "_revertprefetch"):
+    if hasattr(cmdutil, "_revertprefetch"):
         wrapfunction(cmdutil, "_revertprefetch", _revertprefetch)
     else:
         wrapfunction(cmdutil, "revert", revert)
@@ -938,9 +896,9 @@ def exchangepull(orig, repo, remote, *args, **kwargs):
         bundlecaps.add("remotefilelog")
         return orig(source, heads=heads, common=common, bundlecaps=bundlecaps, **kwargs)
 
-    if util.safehasattr(remote, "_callstream"):
+    if hasattr(remote, "_callstream"):
         remote._localrepo = repo
-    elif util.safehasattr(remote, "getbundle"):
+    elif hasattr(remote, "getbundle"):
         wrapfunction(remote, "getbundle", localgetbundle)
 
     return orig(repo, remote, *args, **kwargs)

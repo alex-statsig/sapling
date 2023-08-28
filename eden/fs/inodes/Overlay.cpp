@@ -26,6 +26,7 @@
 #include "eden/fs/inodes/InodeTable.h"
 #include "eden/fs/inodes/OverlayFile.h"
 #include "eden/fs/inodes/TreeInode.h"
+#include "eden/fs/inodes/memcatalog/MemInodeCatalog.h"
 #include "eden/fs/inodes/sqlitecatalog/BufferedSqliteInodeCatalog.h"
 #include "eden/fs/inodes/sqlitecatalog/SqliteInodeCatalog.h"
 #include "eden/fs/sqlite/SqliteDatabase.h"
@@ -41,45 +42,63 @@ constexpr uint64_t ioClosedMask = 1ull << 63;
 
 std::unique_ptr<InodeCatalog> makeInodeCatalog(
     AbsolutePathPiece localDir,
-    Overlay::InodeCatalogType inodeCatalogType,
+    InodeCatalogType inodeCatalogType,
+    InodeCatalogOptions inodeCatalogOptions,
     const EdenConfig& config,
     IFileContentStore* fileContentStore,
     const std::shared_ptr<StructuredLogger>& logger) {
-  if (inodeCatalogType == Overlay::InodeCatalogType::Sqlite) {
+  if (inodeCatalogType == InodeCatalogType::Sqlite) {
+    // Controlled via EdenConfig::unsafeInMemoryOverlay
+    if (inodeCatalogOptions.containsAllOf(INODE_CATALOG_UNSAFE_IN_MEMORY)) {
+      // Controlled via EdenConfig::overlayBuffered
+      if (inodeCatalogOptions.containsAllOf(INODE_CATALOG_BUFFERED)) {
+        XLOG(WARN)
+            << "In-memory Sqlite buffered overlay requested. This will cause data loss.";
+        return std::make_unique<BufferedSqliteInodeCatalog>(
+            std::make_unique<SqliteDatabase>(SqliteDatabase::inMemory), config);
+      } else {
+        XLOG(WARN)
+            << "In-memory Sqlite overlay requested. This will cause data loss.";
+        return std::make_unique<SqliteInodeCatalog>(
+            std::make_unique<SqliteDatabase>(SqliteDatabase::inMemory));
+      }
+    }
+    // Controlled via EdenConfig::overlaySynchronousMode
+    if (inodeCatalogOptions.containsAllOf(INODE_CATALOG_SYNCHRONOUS_OFF)) {
+      // Controlled via EdenConfig::overlayBuffered
+      if (inodeCatalogOptions.containsAllOf(INODE_CATALOG_BUFFERED)) {
+        XLOG(DBG2)
+            << "Buffered Sqlite overlay being used with synchronous-mode = off";
+        return std::make_unique<BufferedSqliteInodeCatalog>(
+            localDir, logger, config, SqliteTreeStore::SynchronousMode::Off);
+      } else {
+        XLOG(DBG2) << "Sqlite overlay being used with synchronous-mode = off";
+        return std::make_unique<SqliteInodeCatalog>(
+            localDir, logger, SqliteTreeStore::SynchronousMode::Off);
+      }
+    }
+    // Controlled via EdenConfig::overlayBuffered
+    if (inodeCatalogOptions.containsAllOf(INODE_CATALOG_BUFFERED)) {
+      XLOG(DBG4) << "Buffered Sqlite overlay being used";
+      return std::make_unique<BufferedSqliteInodeCatalog>(
+          localDir, logger, config);
+    }
+    XLOG(DBG4) << "Sqlite overlay being used.";
     return std::make_unique<SqliteInodeCatalog>(localDir, logger);
-  } else if (inodeCatalogType == Overlay::InodeCatalogType::SqliteInMemory) {
-    XLOG(WARN) << "In-memory overlay requested. This will cause data loss.";
-    return std::make_unique<SqliteInodeCatalog>(
-        std::make_unique<SqliteDatabase>(SqliteDatabase::inMemory));
-  } else if (
-      inodeCatalogType == Overlay::InodeCatalogType::SqliteSynchronousOff) {
-    return std::make_unique<SqliteInodeCatalog>(
-        localDir, logger, SqliteTreeStore::SynchronousMode::Off);
-  } else if (inodeCatalogType == Overlay::InodeCatalogType::SqliteBuffered) {
-    XLOG(DBG4) << "Buffered overlay being used";
-    return std::make_unique<BufferedSqliteInodeCatalog>(
-        localDir, logger, config);
-  } else if (
-      inodeCatalogType == Overlay::InodeCatalogType::SqliteInMemoryBuffered) {
-    XLOG(WARN)
-        << "In-memory buffered overlay requested. This will cause data loss.";
-    return std::make_unique<BufferedSqliteInodeCatalog>(
-        std::make_unique<SqliteDatabase>(SqliteDatabase::inMemory), config);
-  } else if (
-      inodeCatalogType ==
-      Overlay::InodeCatalogType::SqliteSynchronousOffBuffered) {
-    XLOG(DBG2) << "Buffered overlay being used with synchronous-mode = off";
-    return std::make_unique<BufferedSqliteInodeCatalog>(
-        localDir, logger, config, SqliteTreeStore::SynchronousMode::Off);
+  } else if (inodeCatalogType == InodeCatalogType::InMemory) {
+    XLOG(DBG4) << "In-memory overlay being used.";
+    return std::make_unique<MemInodeCatalog>();
   }
 #ifdef _WIN32
   (void)fileContentStore;
-  if (inodeCatalogType == Overlay::InodeCatalogType::Legacy) {
+  if (inodeCatalogType == InodeCatalogType::Legacy) {
     throw std::runtime_error(
         "Legacy overlay type is not supported. Please reclone.");
   }
+  XLOG(DBG4) << "Sqlite overlay being used.";
   return std::make_unique<SqliteInodeCatalog>(localDir, logger);
 #else
+  XLOG(DBG4) << "Legacy overlay being used.";
   return std::make_unique<FsInodeCatalog>(
       static_cast<FileContentStore*>(fileContentStore));
 #endif
@@ -103,8 +122,10 @@ std::shared_ptr<Overlay> Overlay::create(
     AbsolutePathPiece localDir,
     CaseSensitivity caseSensitive,
     InodeCatalogType inodeCatalogType,
+    InodeCatalogOptions inodeCatalogOptions,
     std::shared_ptr<StructuredLogger> logger,
     EdenStatsPtr stats,
+    bool windowsSymlinksEnabled,
     const EdenConfig& config) {
   // This allows us to access the private constructor.
   struct MakeSharedEnabler : public Overlay {
@@ -112,23 +133,29 @@ std::shared_ptr<Overlay> Overlay::create(
         AbsolutePathPiece localDir,
         CaseSensitivity caseSensitive,
         InodeCatalogType inodeCatalogType,
+        InodeCatalogOptions inodeCatalogOptions,
         std::shared_ptr<StructuredLogger> logger,
         EdenStatsPtr stats,
+        bool windowsSymlinksEnabled,
         const EdenConfig& config)
         : Overlay(
               localDir,
               caseSensitive,
               inodeCatalogType,
+              inodeCatalogOptions,
               logger,
               std::move(stats),
+              windowsSymlinksEnabled,
               config) {}
   };
   return std::make_shared<MakeSharedEnabler>(
       localDir,
       caseSensitive,
       inodeCatalogType,
+      inodeCatalogOptions,
       logger,
       std::move(stats),
+      windowsSymlinksEnabled,
       config);
 }
 
@@ -136,24 +163,29 @@ Overlay::Overlay(
     AbsolutePathPiece localDir,
     CaseSensitivity caseSensitive,
     InodeCatalogType inodeCatalogType,
+    InodeCatalogOptions inodeCatalogOptions,
     std::shared_ptr<StructuredLogger> logger,
     EdenStatsPtr stats,
+    bool windowsSymlinksEnabled,
     const EdenConfig& config)
     : fileContentStore_{makeFileContentStore(localDir)},
       inodeCatalog_{makeInodeCatalog(
           localDir,
           inodeCatalogType,
+          inodeCatalogOptions,
           config,
           fileContentStore_ ? fileContentStore_.get() : nullptr,
           logger)},
       inodeCatalogType_{inodeCatalogType},
+      inodeCatalogOptions_(inodeCatalogOptions),
       supportsSemanticOperations_{inodeCatalog_->supportsSemanticOperations()},
       filterAppleDouble_{
           folly::kIsApple && !config.allowAppleDouble.getValue()},
       localDir_{localDir},
       caseSensitive_{caseSensitive},
       structuredLogger_{logger},
-      stats_{std::move(stats)} {}
+      stats_{std::move(stats)},
+      windowsSymlinksEnabled_(windowsSymlinksEnabled) {}
 
 Overlay::~Overlay() {
   close();
@@ -214,7 +246,7 @@ folly::SemiFuture<Unit> Overlay::initialize(
     std::shared_ptr<const EdenConfig> config,
     std::optional<AbsolutePath> mountPath,
     OverlayChecker::ProgressCallback&& progressCallback,
-    OverlayChecker::LookupCallback&& lookupCallback) {
+    InodeCatalog::LookupCallback&& lookupCallback) {
   // The initOverlay() call is potentially slow, so we want to avoid
   // performing it in the current thread and blocking returning to our caller.
   //
@@ -253,7 +285,7 @@ void Overlay::initOverlay(
     std::shared_ptr<const EdenConfig> config,
     std::optional<AbsolutePath> mountPath,
     FOLLY_MAYBE_UNUSED const OverlayChecker::ProgressCallback& progressCallback,
-    FOLLY_MAYBE_UNUSED OverlayChecker::LookupCallback& lookupCallback) {
+    FOLLY_MAYBE_UNUSED InodeCatalog::LookupCallback& lookupCallback) {
   IORequest req{this};
   auto optNextInodeNumber =
       inodeCatalog_->initOverlay(/*createIfNonExisting=*/true);
@@ -317,9 +349,8 @@ void Overlay::initOverlay(
   // here to skip scanning in that case.
   if (folly::kIsWindows && mountPath.has_value()) {
     folly::stop_watch<> fsckRuntime;
-    optNextInodeNumber =
-        dynamic_cast<SqliteInodeCatalog*>(inodeCatalog_.get())
-            ->scanLocalChanges(std::move(config), *mountPath, lookupCallback);
+    optNextInodeNumber = inodeCatalog_->scanLocalChanges(
+        std::move(config), *mountPath, windowsSymlinksEnabled_, lookupCallback);
     auto fsckRuntimeInSeconds =
         std::chrono::duration<double>{fsckRuntime.elapsed()}.count();
     structuredLogger_->logEvent(Fsck{

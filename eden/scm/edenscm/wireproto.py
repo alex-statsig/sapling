@@ -49,7 +49,7 @@ bundle2requiredhint = _("see https://www.mercurial-scm.org/wiki/" "IncompatibleC
 bundle2required = "%s\n(%s)\n" % (bundle2requiredmain, bundle2requiredhint)
 
 
-class abstractserverproto(object):
+class abstractserverproto:
     """abstract class that summarizes the protocol API
 
     Used as reference and documentation.
@@ -451,7 +451,7 @@ class wirepeer(repository.legacypeer):
         else:
             heads = encodelist(heads)
 
-        if util.safehasattr(cg, "deltaheader"):
+        if hasattr(cg, "deltaheader"):
             # this a bundle10, do the old style call sequence
             ret, output = self._callpush("unbundle", cg, heads=heads)
             if ret == "":
@@ -632,7 +632,7 @@ class wirepeer(repository.legacypeer):
 # server side
 
 # wire protocol command can either return a string or one of these classes.
-class streamres(object):
+class streamres:
     """wireproto reply: binary stream
 
     The call was successful and the result is a stream.
@@ -652,7 +652,7 @@ class streamres(object):
         self.v1compressible = v1compressible
 
 
-class pushres(object):
+class pushres:
     """wireproto reply: success with simple integer return
 
     The call was successful and returned an integer contained in `self.res`.
@@ -662,7 +662,7 @@ class pushres(object):
         self.res = res
 
 
-class pusherr(object):
+class pusherr:
     """wireproto reply: failure
 
     The call failed. The `self.res` attribute contains the error message.
@@ -672,7 +672,7 @@ class pusherr(object):
         self.res = res
 
 
-class ooberror(object):
+class ooberror:
     """wireproto reply: failure of a batch of operation
 
     Something failed during a batch call. The error message is stored in
@@ -1163,7 +1163,7 @@ def pushkey(repo, proto, namespace, key, old, new):
     else:
         new = encoding.tolocal(new)  # normal path
 
-    if util.safehasattr(proto, "restore"):
+    if hasattr(proto, "restore"):
 
         proto.redirect()
 
@@ -1213,7 +1213,7 @@ def stream(repo, proto):
         return b"2\n"
 
 
-class streamstate(object):
+class streamstate:
     shallowremote = False
     noflatmf = False
 
@@ -1330,7 +1330,7 @@ def unbundleimpl(repo, proto, heads, replaydata=None, respondlightly=False):
                 replaydata=replaydata,
                 respondlightly=respondlightly,
             )
-            if util.safehasattr(r, "addpart"):
+            if hasattr(r, "addpart"):
                 # The return looks streamable, we are in the bundle2 case and
                 # should return a stream.
                 return streamres(gen=r.getchunks())

@@ -58,7 +58,7 @@ def extsetup(ui):
     extensions.wrapfunction(exchange, "getbundlechunks", getbundlechunks)
     extensions.wrapfunction(bundle2, "processparts", processparts)
 
-    if util.safehasattr(wireproto, "_capabilities"):
+    if hasattr(wireproto, "_capabilities"):
         extensions.wrapfunction(wireproto, "_capabilities", _capabilities)
     else:
         extensions.wrapfunction(wireproto, "capabilities", _capabilities)
@@ -566,7 +566,7 @@ def processparts(orig, repo, op, unbundler):
         bundle2._processpart(op, scratchbookpart)
 
 
-class copiedpart(object):
+class copiedpart:
     """a copy of unbundlepart content that can be consumed later"""
 
     def __init__(self, part):

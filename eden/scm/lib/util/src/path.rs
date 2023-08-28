@@ -126,6 +126,14 @@ pub fn symlink_file(src: &Path, dst: &Path) -> io::Result<()> {
     ));
 }
 
+/// Create symlink for a dir.
+pub fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_dir(src, dst);
+    #[cfg(not(windows))]
+    symlink_file(src, dst)
+}
+
 /// Removes the UNC prefix `\\?\` on Windows. Does nothing on unices.
 pub fn strip_unc_prefix(path: &Path) -> &Path {
     path.strip_prefix(r"\\?\").unwrap_or(path)
@@ -215,6 +223,38 @@ pub fn normalize(path: &Path) -> PathBuf {
     }
 
     result
+}
+
+/// Given cwd, return `path` relative to `root`, or None if `path` is not under `root`.
+/// This is analagous to pathutil.canonpath() in Python.
+pub fn root_relative_path(root: &Path, cwd: &Path, path: &Path) -> IOResult<Option<PathBuf>> {
+    // Make `path` absolute. I'm not sure why `root` is included.
+    // Maybe in case `cwd` is empty? Or to allow root-relative `cwd`?
+    let path = normalize(&root.join(cwd).join(path));
+
+    // Handle easy case when `path` lexically starts w/ `root`.
+    if let Ok(suffix) = path.strip_prefix(root) {
+        return Ok(Some(suffix.to_path_buf()));
+    }
+
+    // Resolve symlinks in `root` so we can do lexical `strip_prefix` below.
+    let root = root.canonicalize().path_context("canonicalizing", root)?;
+
+    // Test parents of `path` looking for symlinks that point under `root`.
+    let mut test = PathBuf::new();
+    let mut path_parts = path.components();
+    while let Some(part) = path_parts.next() {
+        test.push(part);
+        if test.is_symlink() {
+            // TODO: this makes our loop O(n^2)
+            test = test.canonicalize().path_context("canonicalizing", &test)?;
+        }
+        if let Ok(suffix) = test.strip_prefix(&root) {
+            return Ok(Some(suffix.join(path_parts)));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Remove the file pointed by `path`.
@@ -373,7 +413,6 @@ pub fn create_dir_all_with_mode(path: impl AsRef<Path>, mode: u32) -> io::Result
     while let Some(dir) = to_create.pop() {
         match create_dir_with_mode(dir, mode) {
             Ok(()) => continue,
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 to_create.push(dir);
                 match dir.parent() {
@@ -522,8 +561,36 @@ pub fn relativize(base: &Path, path: &Path) -> PathBuf {
     rel_path
 }
 
+/// Replace forward slashes (/) with backward slashes (\) on a wide coded-path
+#[cfg(windows)]
+pub fn replace_slash_with_backslash(path: &Path) -> PathBuf {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::OsStringExt;
+
+    use widestring::U16Str;
+
+    // Convert OsString to Vec<u16> (UTF-16 representation on Windows)
+    let mut utf16_string: Vec<u16> = path.as_os_str().encode_wide().collect();
+
+    let to_replace = U16Str::from_slice(&mut utf16_string)
+        .char_indices()
+        .filter_map(|(i, c)| {
+            c.ok()
+                .map(|c| if c == '/' { Some(i) } else { None })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+
+    for i in to_replace {
+        utf16_string[i] = '\\' as u16;
+    }
+
+    PathBuf::from(std::ffi::OsString::from_wide(&utf16_string))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs::create_dir_all;
     use std::fs::File;
 
     use anyhow::Result;
@@ -533,6 +600,9 @@ mod tests {
 
     #[cfg(windows)]
     mod windows {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::ffi::OsStringExt;
+
         use super::*;
 
         #[test]
@@ -556,6 +626,47 @@ mod tests {
         fn test_normalize_path() {
             assert_eq!(normalize(r"a/b\c\..\.".as_ref()), Path::new(r"a\b"));
             assert_eq!(normalize("z:/a//b/./".as_ref()), Path::new(r"z:\a\b"));
+        }
+
+        #[test]
+        fn test_replace_slash_with_backslash() {
+            // Test replacing a normal string
+            let utf16_bytes: &[u16] = &[0xd83c, 0xdf31, 0x002f, 0x0073, 0x0061, 0x0070];
+            let path = PathBuf::from(std::ffi::OsString::from_wide(utf16_bytes));
+            let expected = "🌱\\sap".encode_utf16().collect::<Vec<_>>();
+            assert_eq!(
+                replace_slash_with_backslash(&path)
+                    .as_os_str()
+                    .encode_wide()
+                    .collect::<Vec<_>>(),
+                expected,
+            );
+
+            // Test replacing string with the / character encoded on it
+            // This string is the same as "expected" above, but with one character corrupted
+            let utf16_bytes: &[u16] = &[0xd83c, 0x002f, 0x002f, 0x0073, 0x0061, 0x0070];
+            // 0x005c is the UTF-16 character for backslash
+            let expected: Vec<u16> = Vec::from([0xd83c, 0x005c, 0x005c, 0x0073, 0x0061, 0x0070]);
+            let path = PathBuf::from(std::ffi::OsString::from_wide(utf16_bytes));
+            assert_eq!(
+                replace_slash_with_backslash(&path)
+                    .as_os_str()
+                    .encode_wide()
+                    .collect::<Vec<_>>(),
+                expected,
+            );
+
+            // Another case of / being on unexpected places
+            let utf16_bytes: &[u16] = &[0x002f, 0xdf31, 0x002f, 0x0073, 0x0061, 0x0070];
+            let expected: Vec<u16> = Vec::from([0x005c, 0xdf31, 0x005c, 0x0073, 0x0061, 0x0070]);
+            let path = PathBuf::from(std::ffi::OsString::from_wide(utf16_bytes));
+            assert_eq!(
+                replace_slash_with_backslash(&path)
+                    .as_os_str()
+                    .encode_wide()
+                    .collect::<Vec<_>>(),
+                expected,
+            );
         }
     }
 
@@ -652,6 +763,21 @@ mod tests {
             let metadata = path.metadata()?;
             assert_eq!(metadata.permissions().mode(), mode);
         }
+
+        // Sanity that there is no error if directory already exists.
+        create_fn(&path)?;
+
+        let broken_symlink = tempdir.path().join("foo").join("bar").join("oops");
+        symlink_file(&tempdir.path().join("doesnt_exist"), &broken_symlink)?;
+
+        // Don't get stuck in a loop due to broken symlink.
+        assert!(create_fn(&broken_symlink.join("nope")).is_err());
+
+        // Sanity that we get errors if there is a regular file in the way.
+        let regular_file = tempdir.path().join("regular_file");
+        File::create(&regular_file)?;
+        assert!(create_fn(&regular_file).is_err());
+        assert!(create_fn(&regular_file.join("no_can_do")).is_err());
 
         Ok(())
     }
@@ -817,5 +943,49 @@ mod tests {
         let cwd = Path::new(".").canonicalize().unwrap();
         let result = relativize(&cwd, &cwd.join("a").join("b"));
         assert_eq!(result, Path::new("a").join("b"));
+    }
+
+    #[test]
+    fn test_root_relative_path() -> Result<()> {
+        let tempdir = TempDir::new()?;
+
+        let parent = tempdir.path().join("parent");
+        let root = parent.join("root");
+        let child = root.join("child");
+        create_dir_all(&child)?;
+
+        assert_eq!(
+            root_relative_path(&root, &root, ".".as_ref())?,
+            Some(PathBuf::from(""))
+        );
+        assert_eq!(
+            root_relative_path(&root, &child, ".".as_ref())?,
+            Some(PathBuf::from("child"))
+        );
+        assert_eq!(
+            root_relative_path(&root, &child, "foo".as_ref())?,
+            Some(["child", "foo"].iter().collect::<PathBuf>()),
+        );
+
+        let symlink_to_root = parent.join("symlink_to_root");
+        symlink_dir(&root, &symlink_to_root)?;
+        assert_eq!(
+            root_relative_path(&root, &root, &symlink_to_root.join("child"))?,
+            Some(PathBuf::from("child")),
+        );
+
+        let symlink_to_child = parent.join("symlink_to_child");
+        symlink_dir(&child, &symlink_to_child)?;
+        assert_eq!(
+            root_relative_path(&root, &root, &symlink_to_child.join("foo"))?,
+            Some(["child", "foo"].iter().collect::<PathBuf>()),
+        );
+
+        assert!(root_relative_path(&root, &parent, "foo".as_ref())?.is_none());
+
+        // Sanity that we don't treat "root" as prefix of "rootbeer".
+        assert!(root_relative_path(&root, &root, &parent.join("rootbeer"))?.is_none());
+
+        Ok(())
     }
 }

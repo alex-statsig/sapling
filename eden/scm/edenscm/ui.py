@@ -61,7 +61,6 @@ samplehgrcs = {
 [ui]
 # name and email, e.g.
 # username = Jane Doe <jdoe@example.com>
-username =
 
 # uncomment to disable color in command output
 # (see '@prog@ help color' for details)
@@ -110,7 +109,7 @@ default = %s
 }
 
 
-class httppasswordmgrdbproxy(object):
+class httppasswordmgrdbproxy:
     """Delays loading urllib2 until it's needed."""
 
     def __init__(self):
@@ -153,7 +152,7 @@ class deprecationlevel(IntEnum):
     Block = 4
 
 
-class ui(object):
+class ui:
     def __init__(self, src=None, rcfg=None):
         """Create a fresh new ui object if no src given
 
@@ -570,8 +569,15 @@ class ui(object):
             user = encoding.environ.get("EMAIL")
         if user is None and acceptempty:
             return user
-        if user is None and self.configbool("ui", "askusername"):
-            user = self.prompt(_("enter a commit username:"), default=None)
+        if user is None and not self.plain("username"):
+            user = _auto_username(self)
+            if user is None and self.configbool("ui", "askusername"):
+                user = self.prompt(_("enter a commit username:"), default=None)
+            if user is not None:
+                # Write username back to user config.
+                path = self.identity.userconfigpath()
+                rcutil.editconfig(ui, path, "ui", "username", user)
+                return user
         if user is None and not self.interactive() and self.plain():
             try:
                 user = "%s@%s" % (util.getuser(), socket.getfqdn())
@@ -903,7 +909,7 @@ class ui(object):
 
         wasformatted = self.formatted
         wasterminaloutput = self.terminaloutput()
-        if util.safehasattr(signal, "SIGPIPE"):
+        if hasattr(signal, "SIGPIPE"):
             util.signal(signal.SIGPIPE, _catchterm)
         if pagercmd == "internal:streampager":
             self._runinternalstreampager()
@@ -1002,7 +1008,7 @@ class ui(object):
 
         @self.atexit
         def killpager():
-            if util.safehasattr(signal, "SIGINT"):
+            if hasattr(signal, "SIGINT"):
                 util.signal(signal.SIGINT, signal.SIG_IGN)
             # restore original fds, closing pager.stdin copies in the process
             os.dup2(stdoutfd, util.stdout.fileno())
@@ -2022,7 +2028,7 @@ def pushrevpathoption(ui, path, value):
     return value
 
 
-class path(object):
+class path:
     """Represents an individual path and its configuration."""
 
     _all_dotdirs = [ident.dotdir() for ident in bindings.identity.all()]
@@ -2099,3 +2105,11 @@ class path(object):
             if value is not None:
                 d[subopt] = value
         return d
+
+
+def _auto_username(ui):
+    """automatically figure out the username "Foo bar <foo@example.com>", or return None.
+
+    This function is to be wrapped by extensions.
+    """
+    return None

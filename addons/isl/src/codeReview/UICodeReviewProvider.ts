@@ -15,6 +15,7 @@ import type {ReactNode} from 'react';
  */
 export interface UICodeReviewProvider {
   name: string;
+  label: string;
 
   /** name used to run commands provider-specific commands */
   cliName?: string;
@@ -29,12 +30,16 @@ export interface UICodeReviewProvider {
       draft?: boolean;
       /** If this diff is being resubmitted, this message will be added as a comment to explain what has changed */
       updateMessage?: string;
+      /** Whether to update the remote message with the local commit message */
+      updateFields?: boolean;
     },
   ): Operation;
 
   RepoInfo(): JSX.Element | null;
 
   isDiffClosed(summary: DiffSummary): boolean;
+
+  isDiffEligibleForCleanup(summary: DiffSummary): boolean;
 
   /**
    * Defines when this review provider can submit diffs as drafts,
@@ -58,4 +63,8 @@ export interface UICodeReviewProvider {
     commits: Array<CommitInfo>,
     allDiffSummaries: Map<string, DiffSummary>,
   ): Array<CommitInfo>;
+
+  enableMessageSyncing: boolean;
+
+  supportsSuggestedReviewers: boolean;
 }

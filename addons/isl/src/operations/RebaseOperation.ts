@@ -8,6 +8,8 @@
 import type {ApplyPreviewsFuncType, PreviewContext} from '../previews';
 import type {Hash, Revset} from '../types';
 
+import {latestSuccessor} from '../SuccessionTracker';
+import {t} from '../i18n';
 import {CommitPreview} from '../previews';
 import {SucceedableRevset} from '../types';
 import {Operation} from './Operation';
@@ -29,9 +31,14 @@ export class RebaseOperation extends Operation {
     ];
   }
 
+  getInitialInlineProgress(): Array<[string, string]> {
+    // TODO: successions
+    return [[this.source, t('rebasing...')]];
+  }
+
   makePreviewApplier(context: PreviewContext): ApplyPreviewsFuncType | undefined {
     const {treeMap} = context;
-    const originalSourceNode = treeMap.get(this.source);
+    const originalSourceNode = treeMap.get(latestSuccessor(context, this.source));
     if (originalSourceNode == null) {
       return undefined;
     }
@@ -42,7 +49,7 @@ export class RebaseOperation extends Operation {
     let parentHash: Hash;
 
     const func: ApplyPreviewsFuncType = (tree, previewType) => {
-      if (tree.info.hash === this.source) {
+      if (tree.info.hash === latestSuccessor(context, this.source)) {
         if (tree.info.parents[0] === parentHash) {
           // this is the newly added node
           return {
@@ -61,7 +68,7 @@ export class RebaseOperation extends Operation {
           };
         }
       } else if (
-        tree.info.hash === this.destination ||
+        tree.info.hash === latestSuccessor(context, this.destination) ||
         tree.info.remoteBookmarks.includes(this.destination)
       ) {
         parentHash = tree.info.hash;
@@ -86,7 +93,7 @@ export class RebaseOperation extends Operation {
 
   makeOptimisticApplier(context: PreviewContext): ApplyPreviewsFuncType | undefined {
     const {treeMap} = context;
-    const originalSourceNode = treeMap.get(this.source);
+    const originalSourceNode = treeMap.get(latestSuccessor(context, this.source));
     if (originalSourceNode == null) {
       // once we don't see the source anymore, we don't have optimistic state to apply (that commit has been rebased).
       return undefined;
@@ -99,7 +106,7 @@ export class RebaseOperation extends Operation {
     let parentHash: Hash;
 
     const func: ApplyPreviewsFuncType = (tree, previewType, childPreviewType) => {
-      if (tree.info.hash === this.source) {
+      if (tree.info.hash === latestSuccessor(context, this.source)) {
         if (tree.info.parents[0] === parentHash) {
           // this is the newly added node
           return {
@@ -113,7 +120,7 @@ export class RebaseOperation extends Operation {
           return {info: null};
         }
       } else if (
-        tree.info.hash === this.destination ||
+        tree.info.hash === latestSuccessor(context, this.destination) ||
         tree.info.remoteBookmarks.includes(this.destination)
       ) {
         parentHash = tree.info.hash;

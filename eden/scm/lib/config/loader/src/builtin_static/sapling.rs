@@ -147,7 +147,6 @@ histedit=
 infinitepush=!
 journal=
 logginghelper=
-lz4revlog=
 morestatus=
 myparent=
 obsshelve=
@@ -518,7 +517,6 @@ filechangesplain={
 filechangesdetailed={ifeq(verbosity,"verbose",diff()|hgprefix,stat("status")|hgprefix)}\n
 
 [copytrace]
-fastcopytrace=True
 maxmovescandidatestocheck=0
 
 [perftweaks]

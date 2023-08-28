@@ -137,6 +137,41 @@ impl Identity {
     }
 
     pub fn user_config_paths(&self) -> Vec<PathBuf> {
+        // Read from "CONFIG" env var
+        if let Some(Ok(rcpath)) = self.env_var("CONFIG") {
+            let paths = split_rcpath(&rcpath, &["user"]);
+            let paths: Vec<PathBuf> = paths
+                .flat_map(|p| {
+                    if p == "." {
+                        self.all_builtin_user_config_paths()
+                    } else {
+                        vec![PathBuf::from(p)]
+                    }
+                })
+                .collect();
+            // paths.is_empty() test is for test compatibility.
+            if !paths.is_empty() {
+                tracing::debug!("user_config_paths from CONFIG: {:?}", paths);
+                return paths;
+            }
+        }
+
+        let paths = self.all_builtin_user_config_paths();
+        tracing::debug!("user_config_paths from builtin: {:?}", paths);
+        paths
+    }
+
+    fn all_builtin_user_config_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.builtin_user_config_paths();
+        for ident in all() {
+            if ident.cli_name() != self.cli_name() {
+                paths.append(&mut ident.builtin_user_config_paths());
+            }
+        }
+        paths
+    }
+
+    fn builtin_user_config_paths(&self) -> Vec<PathBuf> {
         let config_dir = match self.user.config_user_directory {
             None => match home_dir() {
                 None => return Vec::new(),
@@ -156,20 +191,70 @@ impl Identity {
             }
         };
 
-        self.user
+        let paths = self
+            .user
             .config_user_files
             .iter()
             .map(|f| config_dir.join(f))
-            .collect()
+            .collect();
+        paths
     }
 
-    pub fn system_config_path(&self) -> Option<PathBuf> {
+    /// Return the first user config path that exists.
+    /// If none of the paths exist, return the first user config path.
+    /// Might return `None` if `CONFIG` does not specify user config paths.
+    pub fn user_config_path(&self) -> Option<PathBuf> {
+        let paths = self.user_config_paths();
+        paths
+            .iter()
+            .filter(|p| p.exists())
+            .next()
+            .cloned()
+            .or_else(|| paths.into_iter().next())
+    }
+
+    pub fn system_config_paths(&self) -> Vec<PathBuf> {
+        // Read from "CONFIG" env var
+        if let Some(Ok(rcpath)) = self.env_var("CONFIG") {
+            let paths = split_rcpath(&rcpath, &["sys", ""]);
+            let paths = paths
+                .flat_map(|p| {
+                    if p == "." {
+                        self.all_builtin_system_config_paths()
+                    } else {
+                        vec![PathBuf::from(p)]
+                    }
+                })
+                .collect();
+            tracing::debug!("system_config_paths from CONFIG: {:?}", paths);
+            return paths;
+        }
+
+        // Also include paths from other identities.
+        let paths = self.all_builtin_system_config_paths();
+        tracing::debug!("system_config_paths from builtin: {:?}", paths);
+        paths
+    }
+
+    fn all_builtin_system_config_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.builtin_system_config_paths();
+        for ident in all() {
+            if ident.cli_name() != self.cli_name() {
+                paths.append(&mut ident.builtin_system_config_paths());
+            }
+        }
+        paths
+    }
+
+    fn builtin_system_config_paths(&self) -> Vec<PathBuf> {
         if cfg!(windows) {
-            std::env::var("PROGRAMDATA")
-                .ok()
-                .map(|p| PathBuf::from(p).join(self.user.config_system_path))
+            let mut result = Vec::new();
+            if let Some(dir) = std::env::var_os("PROGRAMDATA") {
+                result.push(PathBuf::from(dir).join(self.user.config_system_path))
+            }
+            result
         } else {
-            Some(self.user.config_system_path.into())
+            vec![self.user.config_system_path.into()]
         }
     }
 
@@ -177,6 +262,38 @@ impl Identity {
         tmpl.replace("@prog@", self.cli_name())
             .replace("@Product@", self.product_name())
     }
+}
+
+const RCPATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
+
+/// Split the HGRCPATH. Return items matching at least one of the given prefix.
+fn split_rcpath<'a>(
+    rcpath: &'a str,
+    prefix_list: &'static [&'static str],
+) -> impl Iterator<Item = &'a str> {
+    const KNOWN_PREFIXES: &[&str] = if cfg!(feature = "fb") {
+        &["sys", "user", "fb" /* See D48042830 */]
+    } else {
+        &["sys", "user"]
+    };
+    let paths = rcpath.split(RCPATH_SEP);
+    paths.filter_map(|path| {
+        let mut split = path.splitn(2, '=');
+        if let Some(prefix) = split.next() {
+            if KNOWN_PREFIXES.contains(&prefix) {
+                return if prefix_list.contains(&prefix) {
+                    split.next()
+                } else {
+                    None
+                };
+            }
+        }
+        if prefix_list.contains(&"") {
+            Some(path)
+        } else {
+            None
+        }
+    })
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -540,5 +657,16 @@ mod test {
         assert_eq!(sniffed_ident.user, default().user);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_split_rcpath() {
+        let rcpath = [
+            "sys=111", "user=222", "sys=333", "user=444", "555", "foo=666",
+        ]
+        .join(&RCPATH_SEP.to_string());
+        let t = |prefix_list| -> Vec<&str> { split_rcpath(&rcpath, prefix_list).collect() };
+        assert_eq!(t(&["sys", ""]), ["111", "333", "555", "foo=666"]);
+        assert_eq!(t(&["user"]), ["222", "444"]);
     }
 }

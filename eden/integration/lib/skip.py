@@ -26,9 +26,6 @@ if sys.platform == "win32":
         #
         # Test classes from the main integration test binary
         #
-        "basic_test.BasicTest": [
-            "test_symlinks",
-        ],
         "basic_test.PosixTest": True,
         "chown_test.ChownTest": True,
         "clone_test.CloneFakeEdenFSTestAdHoc": True,
@@ -95,7 +92,6 @@ if sys.platform == "win32":
         "takeover_test.TakeoverTestHg": True,
         "takeover_test.TakeoverTestNoNFSServerHg": True,
         "thrift_test.ThriftTestHg": [
-            "test_get_sha1_throws_for_symlink",
             "test_get_blake3_throws_for_symlink",
             "test_pid_fetch_counts",
             "test_unload_free_inodes",
@@ -107,39 +103,43 @@ if sys.platform == "win32":
         #
         # Test classes from the hg integration test binary
         #
-        "hg.debug_clear_local_caches_test.DebugClearLocalCachesTestTreeOnly": [
+        "hg.debug_clear_local_caches_test.DebugClearLocalCachesTest": [
             # Graceful restart is not implemented on Windows
             "test_contents_are_the_same_if_handle_is_held_open",
         ],
-        "hg.debug_get_parents.DebugGetParentsTestTreeOnly": True,
-        "hg.debug_hg_dirstate_test.DebugHgDirstateTestTreeOnly": True,
-        "hg.diff_test.DiffTestTreeOnly": True,
-        "hg.grep_test.GrepTestTreeOnly": [
+        "hg.debug_get_parents.DebugGetParentsTest": True,
+        "hg.debug_hg_dirstate_test.DebugHgDirstateTest": True,
+        "hg.diff_test.DiffTest": True,
+        "hg.grep_test.GrepTest": [
             "test_grep_directory_from_root",
             "test_grep_directory_from_subdirectory",
         ],
-        "hg.rebase_test.RebaseTestTreeOnly": [
-            "test_rebase_commit_with_independent_folder"
-        ],
-        "hg.rm_test.RmTestTreeOnly": [
+        "hg.rebase_test.RebaseTest": ["test_rebase_commit_with_independent_folder"],
+        "hg.rm_test.RmTest": [
             "test_rm_directory_with_modification",
             "test_rm_modified_file_permissions",
         ],
-        "hg.split_test.SplitTestTreeOnly": ["test_split_one_commit_into_two"],
-        "hg.status_deadlock_test.StatusDeadlockTestTreeOnly": True,
-        "hg.status_test.StatusTestTreeOnly": [
+        "hg.split_test.SplitTest": ["test_split_one_commit_into_two"],
+        "hg.status_deadlock_test.StatusDeadlockTest": True,
+        "hg.status_test.StatusTest": [
             # TODO: Opening a file with O_TRUNC inside an EdenFS mount fails on Windows
             "test_partial_truncation_after_open_modifies_file",
             # TODO: These tests do not report the file as modified after truncation
             "test_truncation_after_open_modifies_file",
             "test_truncation_upon_open_modifies_file",
         ],
-        "hg.update_test.UpdateCacheInvalidationTestTreeOnly": [
+        "hg.update_test.UpdateCacheInvalidationTest": [
             "test_changing_file_contents_creates_new_inode_and_flushes_dcache"
         ],
-        "hg.update_test.UpdateTestTreeOnly": [
+        "hg.update_test.UpdateTest": [
             # TODO: A \r\n is used
             "test_mount_state_during_unmount_with_in_progress_checkout",
+            # Windows doesn't support executable files; mode changes are no-op
+            "test_mode_change_with_no_content_change",
+        ],
+        "hg.update_test.UpdateTestTreeOnlyInMemory": [
+            # kill and restart Eden
+            "test_resume_interrupted_update"
         ],
         "stale_inode_test.StaleInodeTestHgNFS": True,
         "windows_fsck_test.WindowsFsckTestHg": [
@@ -290,18 +290,24 @@ if sys.platform != "win32":
             "projfs_enumeration.ProjFSEnumeration": True,
             "projfs_enumeration.ProjFSEnumerationInsufficientBuffer": True,
             "prjfs_match_fs.PrjfsMatchFsTest": True,
+            "hg.symlink_test.SymlinkWindowsDisabledTest": True,
         }
     )
+
 
 def _have_ntapi_extension_module() -> bool:
     if sys.platform != "win32":
         return False
 
     try:
-        from eden.integration.lib.ntapi import get_directory_entry_size  # @manual # @nolint
+        from eden.integration.lib.ntapi import (  # @manual  # @nolint
+            get_directory_entry_size,
+        )
+
         return True
     except ImportError:
         return False
+
 
 # ProjFS enumeration tests depend on a Python extension module, which may not be
 # available with all build systems.
@@ -382,8 +388,15 @@ if sys.platform.startswith("linux"):
 
 if "SANDCASTLE" in os.environ:
     # This test seems to leave behind unkillable processes on sandcastle.
-    # Disable it for now.
-    TEST_DISABLED["hg.update_test.UpdateTest"] = ["test_dir_locking"]
+    # Disable it for now. Append to TEST_DISABLED below to preserve existing disabled tests.
+    class_name = "hg.update_test.UpdateTest"
+    method_name = "test_dir_locking"
+    class_skipped = TEST_DISABLED.get(class_name)
+    if class_skipped is None:
+        TEST_DISABLED[class_name] = [method_name]
+    elif isinstance(class_skipped, list):
+        if method_name not in class_skipped:
+            class_skipped.append(method_name)
 
 try:
     from eden.integration.facebook.lib.skip import add_fb_specific_skips

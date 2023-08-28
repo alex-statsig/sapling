@@ -23,7 +23,7 @@ def _lowerclean(s):
     return encoding.hfsignoreclean(s.lower())
 
 
-class pathauditor(object):
+class pathauditor:
     """ensure that a filesystem path contains no banned components.
     the following properties of a path are checked:
 
@@ -151,13 +151,12 @@ class pathauditor(object):
             return False
 
 
-def canonpath(root, cwd, myname, auditor=None):
+def canonpath(root, cwd, myname):
     """return the canonical path of myname, given cwd and root
 
     >>> def check(root, cwd, myname):
-    ...     a = pathauditor(root, realfs=False)
     ...     try:
-    ...         return canonpath(root, cwd, myname, a)
+    ...         return canonpath(root, cwd, myname)
     ...     except error.Abort:
     ...         return 'aborted'
     >>> def unixonly(root, cwd, myname, expected='aborted'):
@@ -201,11 +200,8 @@ def canonpath(root, cwd, myname, auditor=None):
     if not os.path.isabs(name):
         name = os.path.join(root, cwd, name)
     name = os.path.normpath(name)
-    if auditor is None:
-        auditor = pathauditor(root)
     if name != rootsep and name.startswith(rootsep):
         name = name[len(rootsep) :]
-        auditor(name)
         return util.pconvert(name)
     elif name == root:
         return ""
@@ -228,7 +224,6 @@ def canonpath(root, cwd, myname, auditor=None):
                     return ""
                 tail.reverse()
                 name = os.path.join(*tail)
-                auditor(name)
                 return util.pconvert(name)
             dirname, basename = util.split(head)
             if dirname == head:
@@ -241,7 +236,7 @@ def canonpath(root, cwd, myname, auditor=None):
         # into a subdirectory of "root". Try resolving the first
         # symlink and invoking ourself recursively to see if we end up
         # under "root". We don't want to resolve all symlinks at once
-        # since later symlinks in "name" could by inside the repo, and
+        # since later symlinks in "name" could be inside the repo, and
         # we don't want to resolve those.
         maybesymlink = head
         while tail:
@@ -269,7 +264,7 @@ def canonpath(root, cwd, myname, auditor=None):
         hint = None
         try:
             if cwd != root:
-                canonpath(root, root, myname, auditor)
+                canonpath(root, root, myname)
                 relpath = util.pathto(root, cwd, "")
                 if relpath[-1] == pycompat.ossep:
                     relpath = relpath[:-1]

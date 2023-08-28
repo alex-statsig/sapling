@@ -294,12 +294,6 @@ def checklink(path: str) -> bool:
             return False
 
 
-def safehasattr(thing, attr):
-    # Use instead of the builtin ``hasattr``. (See
-    # https://hynek.me/articles/hasattr/)
-    return getattr(thing, attr, _notset) is not _notset
-
-
 def bitsfrom(container):
     bits = 0
     for bit in container:
@@ -341,7 +335,7 @@ for k in DIGESTS_BY_STRENGTH:
     assert k in DIGESTS
 
 
-class digester(object):
+class digester:
     """helper to compute digests.
 
     This helper can be used to compute one or more digests given their name.
@@ -389,7 +383,7 @@ class digester(object):
         return None
 
 
-class digestchecker(object):
+class digestchecker:
     """file handle wrapper that additionally checks content against a given
     size and digests.
 
@@ -634,7 +628,7 @@ def Enum(clsname, names, module=None):
     return type(clsname, (object,), namespace)
 
 
-class cow(object):
+class cow:
     """helper class to make copy-on-write easier
 
     Call preparewrite before doing any writes.
@@ -751,7 +745,7 @@ class transactional(pycompat.ABC):
             self.release()
 
 
-class refcell(object):
+class refcell:
     """Similar to Rust's Rc<RefCell>. Shared *mutable* reference.
 
     This is useful when object mutation needs to affect shared copies.
@@ -803,7 +797,7 @@ def acceptintervention(tr=None):
         tr.release()
 
 
-class nullcontextmanager(object):
+class nullcontextmanager:
     def __enter__(self):
         return self
 
@@ -824,7 +818,7 @@ def environoverride(name, value):
             encoding.environ[name] = origvalue
 
 
-class _lrucachenode(object):
+class _lrucachenode:
     """A node in a doubly linked list.
 
     Holds a reference to nodes on either side as well as a key-value
@@ -845,7 +839,7 @@ class _lrucachenode(object):
         self.key = _notset
 
 
-class lrucachedict(object):
+class lrucachedict:
     """Dict that caches most recent accesses and sets.
 
     The dict consists of an actual backing dict - indexed by original
@@ -1235,7 +1229,7 @@ def mainfrozen():
     The code supports py2exe (most common, Windows only) and tools/freeze
     (portable, not much used).
     """
-    return safehasattr(sys, "frozen") or safehasattr(
+    return hasattr(sys, "frozen") or hasattr(
         sys, "importers"
     )  # new py2exe  # tools/freeze
 
@@ -1542,7 +1536,7 @@ def fscasesensitive(path):
 _regex = bindings.regex
 
 
-class _re(object):
+class _re:
     def compile(self, pat, flags=0):
         """Compile a regular expression, using Rust regex if possible
 
@@ -1659,7 +1653,7 @@ def checknlink(testfile):
                 pass
 
 
-class stringwriter(object):
+class stringwriter:
     """Wraps a file-like object that wants bytes, and exposes write(unicode) and
     writebytes(bytes) functions. This is useful for passing file-like objects to
     places that expect a ui.write/writebytes like interface.
@@ -1817,7 +1811,7 @@ def truncatefile(fname, vfs, size, checkambig=False):
     vfs.rename(newname, fname, checkambig=checkambig)
 
 
-class filestat(object):
+class filestat:
     """help to exactly detect change of a file
 
     'stat' attribute is result of 'os.stat()' if specified 'path'
@@ -1973,7 +1967,7 @@ class atomictempfile(BinaryIO):
             self._fp.close()
 
     def __del__(self) -> None:
-        if safehasattr(self, "_fp"):  # constructor actually did something
+        if hasattr(self, "_fp"):  # constructor actually did something
             self.discard()
 
     def __enter__(self) -> "atomictempfile":
@@ -2126,7 +2120,7 @@ def replacefile(path, text):
         fp.close()
 
 
-class chunkbuffer(object):
+class chunkbuffer:
     """Allow arbitrary sized chunks of data to be efficiently read from an
     iterator over chunks of arbitrary size."""
 
@@ -2895,7 +2889,7 @@ _hextochr = dict(
 )
 
 
-class url(object):
+class url:
     r"""Reliable URL parser.
 
     This parses URLs and provides attributes for the following
@@ -3332,7 +3326,7 @@ def inttosize(value):
     return "{0:.1f}{1:s}".format((value / float(last[1])), last[0].upper())
 
 
-class hooks(object):
+class hooks:
     """A collection of hook functions that can be used to extend a
     function's behavior. Hooks are called in lexicographic order,
     based on the names of their sources."""
@@ -3412,7 +3406,7 @@ compewireprotosupport = collections.namedtuple(
 )
 
 
-class compressormanager(object):
+class compressormanager:
     """Holds registrations of various compression engines.
 
     This class essentially abstracts the differences between compression
@@ -3577,7 +3571,7 @@ class compressormanager(object):
 compengines = compressormanager()
 
 
-class compressionengine(object):
+class compressionengine:
     """Base class for compression engines.
 
     Compression engines must implement the interface defined by this class.
@@ -3739,7 +3733,7 @@ class _zlibengine(compressionengine):
 
         return chunkbuffer(gen())
 
-    class zlibrevlogcompressor(object):
+    class zlibrevlogcompressor:
         def compress(self, data):
             insize = len(data)
             # Caller handles empty input case.
@@ -3878,7 +3872,7 @@ class _noopengine(compressionengine):
     def decompressorreader(self, fh):
         return fh
 
-    class nooprevlogcompressor(object):
+    class nooprevlogcompressor:
         def compress(self, data):
             return None
 
@@ -3952,7 +3946,7 @@ class _zstdengine(compressionengine):
 
         return chunkbuffer(itervalues())
 
-    class zstdrevlogcompressor(object):
+    class zstdrevlogcompressor:
         def __init__(self, zstd, level=3):
             self._zstd = zstd
             self._level = level
@@ -3978,7 +3972,7 @@ def bundlecompressiontopics():
 
     # We need to format the docstring. So use a dummy object/type to hold it
     # rather than mutating the original.
-    class docobject(object):
+    class docobject:
         pass
 
     for name in compengines:
@@ -4033,7 +4027,7 @@ def safename(f, tag, ctx, others=None):
             return fn
 
 
-class ring(object):
+class ring:
     """
     FIFO Ringbuffer
 
@@ -4154,10 +4148,10 @@ def timefunction(key, uiposition=None, uiname=None):
                 uiarg = getattr(uiarg, uiname)
             if uiarg is None:
                 for arg in list(args) + list(kwargs.values()):
-                    if safehasattr(arg, "timesection"):
+                    if hasattr(arg, "timesection"):
                         uiarg = arg
                         break
-                    elif safehasattr(arg, "ui"):
+                    elif hasattr(arg, "ui"):
                         uiarg = arg.ui
                         break
             assert uiarg
@@ -4169,7 +4163,7 @@ def timefunction(key, uiposition=None, uiname=None):
     return wrapper
 
 
-class traced(object):
+class traced:
     """Trace a block.
 
     Examples:
@@ -4731,7 +4725,7 @@ def printrecordedtracebacks():
             mainio.write_err((" %d %s\n" % (count, tb)).encode())
 
 
-class wrapped_stat_result(object):
+class wrapped_stat_result:
     """Mercurial assumes that st_[amc]time is an integer, but Python 3
     returns a float value. This class overrides these attributes
     with their integer counterpart.
@@ -4800,9 +4794,18 @@ def gcdir(path, mtimethreshold):
             tryunlink(path)
 
 
-def spawndetached(args, cwd=None, env=None):
-    cmd = bindings.process.Command.new(args[0])
-    cmd.args(args[1:])
+def spawndetached(args, cwd=None, env=None, shell=False):
+    Command = bindings.process.Command
+    if shell:
+        assert isinstance(args, str), "args must be str with shell=True"
+        if os.name == "nt":
+            comspec = os.getenv("ComSpec") or "cmd.exe"
+            cmd = Command.new(comspec).arg("/c").rawarg(args)
+        else:
+            cmd = Command.new("/bin/sh").arg("-c").arg(args)
+    else:
+        assert isinstance(args, list), "args must be List[str] with shell=False"
+        cmd = Command.new(args[0]).args(args[1:])
     if cwd is not None:
         cmd.currentdir(cwd)
     if env is not None:

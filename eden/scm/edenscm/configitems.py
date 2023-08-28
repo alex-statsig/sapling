@@ -32,7 +32,7 @@ def loadconfigtable(ui, extname, configtable):
         knownitems.update(items)
 
 
-class configitem(object):
+class configitem:
     """represent a known config item
 
     :section: the official config section where to find this item,
@@ -569,7 +569,6 @@ coreconfigitem("worker", "enabled", default=True)
 coreconfigitem("worker", "numcpus", default=None)
 
 coreconfigitem("workingcopy", "ruststatus", default=False)
-coreconfigitem("workingcopy", "use-rust", default=True)
 
 # Rebase related configuration moved to core because other extension are doing
 # strange things. For example, shelve import the extensions to reuse some bit
@@ -580,15 +579,5 @@ coreconfigitem("rebase", "singletransaction", default=False)
 coreconfigitem("rebase", "experimental.inmemory", default=False)
 
 # Remote names.
-coreconfigitem("remotenames", "autocleanupthreshold", default=50)
 # XXX: Enable selectivepull for tests.
 coreconfigitem("remotenames", "selectivepull", default=not util.istest())
-coreconfigitem("remotenames", "selectivepulldefault", default=["master"])
-coreconfigitem("remotenames", "selectivepulldiscovery", default=True)
-coreconfigitem("remotenames", "autopullhoistpattern", default="")
-coreconfigitem(
-    "remotenames",
-    "autopullpattern",
-    default=r"re:^(?:default|remote)/[A-Za-z0-9._/-]+$",
-)
-configitem("remotenames", "hoist", default="default")

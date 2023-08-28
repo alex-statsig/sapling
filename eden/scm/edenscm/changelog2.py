@@ -36,7 +36,7 @@ SEGMENTS_DIR_NEXT = "segments/v1next"  # Used on Windows, for migration.
 HGCOMMITS_DIR = "hgcommits/v1"
 
 
-class changelog(object):
+class changelog:
     """Changelog backed by Rust objects.
 
     Many methods exist for compatibility. New code should consider using `dag`,
@@ -87,60 +87,6 @@ class changelog(object):
         segmentsdir = _segmentsdir(svfs)
         hgcommitsdir = svfs.join(HGCOMMITS_DIR)
         inner = bindings.dag.commits.opensegments(segmentsdir, hgcommitsdir)
-        return cls(repo, inner, uiconfig)
-
-    @classmethod
-    def opendoublewrite(cls, repo, uiconfig):
-        svfs = repo.svfs
-        revlogdir = svfs.join("")
-        segmentsdir = _segmentsdir(svfs)
-        hgcommitsdir = svfs.join(HGCOMMITS_DIR)
-        inner = bindings.dag.commits.opendoublewrite(
-            revlogdir, segmentsdir, hgcommitsdir
-        )
-        return cls(repo, inner, uiconfig)
-
-    @classmethod
-    def openhybrid(cls, repo):
-        return cls._openhybrid(repo, userevlog=True)
-
-    @classmethod
-    def openlazytext(cls, repo):
-        return cls._openhybrid(repo, userevlog=False)
-
-    @classmethod
-    def openlazy(cls, repo):
-        return cls._openhybrid(repo, userevlog=False, lazyhash=True)
-
-    @classmethod
-    def _openhybrid(cls, repo, userevlog, lazyhash=False):
-        svfs = repo.svfs
-        uiconfig = repo.ui.uiconfig()
-        if userevlog:
-            revlogdir = svfs.join("")
-        else:
-            revlogdir = None
-        segmentsdir = _segmentsdir(svfs)
-        hgcommitsdir = svfs.join(HGCOMMITS_DIR)
-        # special file for testing lazy hash backend
-        lazyhashdir = svfs.tryread("lazyhashdir") or None
-        inner = bindings.dag.commits.openhybrid(
-            revlogdir,
-            segmentsdir,
-            hgcommitsdir,
-            repo.edenapi,
-            lazyhash=lazyhash,
-            lazyhashdir=lazyhashdir,
-        )
-        return cls(repo, inner, uiconfig)
-
-    @classmethod
-    def opengitsegments(cls, repo, uiconfig):
-        svfs = repo.svfs
-        segmentsdir = _segmentsdir(svfs)
-        gitdir = git.readgitdir(repo)
-        metalog = repo.metalog()
-        inner = bindings.dag.commits.opengitsegments(gitdir, segmentsdir, metalog)
         return cls(repo, inner, uiconfig)
 
     @property
@@ -379,7 +325,10 @@ class changelog(object):
         """
         short version of read that only returns the files modified by the cset
         """
-        text = self.revision(node)
+        # For performance we skip verifying the commit hash, which can trigger
+        # remote lookups of the parent hashes. A real-world example is:
+        # log -r " reverse(master~1000::master) & not(file(r're:.*'))"
+        text = self.revision(node, verify=False)
         return readfiles(text)
 
     def add(
@@ -479,6 +428,7 @@ class changelog(object):
         nodeorrev: "Union[int, bytes]",
         _df: "Optional[IO]" = None,
         raw: bool = False,
+        verify: bool = True,
     ) -> bytes:
         if nodeorrev in {nullid, nullrev}:
             return b""
@@ -490,7 +440,7 @@ class changelog(object):
         if text is None:
             raise error.LookupError(node, self.indexfile, _("no node"))
         # Do not verify hg hash if git hash is being used.
-        if not self._isgit:
+        if verify and not self._isgit:
             # check HG SHA1 hash
             p1, p2 = self.parents(node)[:2]
             if revlog.hash(text, p1, p2) != node:
@@ -674,7 +624,7 @@ class changelog(object):
         return True
 
 
-class nodemap(object):
+class nodemap:
     def __init__(self, changelog):
         self.changelog = changelog
 

@@ -53,7 +53,7 @@ class FakeBackingStore final : public BackingStore {
   ObjectId parseObjectId(folly::StringPiece objectId) override;
   std::string renderObjectId(const ObjectId& objectId) override;
 
-  ImmediateFuture<TreePtr> getRootTree(
+  ImmediateFuture<GetRootTreeResult> getRootTree(
       const RootId& commitID,
       const ObjectFetchContextPtr& context) override;
   ImmediateFuture<std::shared_ptr<TreeEntry>> getTreeEntryForObjectId(
@@ -79,7 +79,7 @@ class FakeBackingStore final : public BackingStore {
    * mercurial- or git-backed store, but it will be consistent for the
    * duration of the test.)
    */
-  StoredBlob* putBlob(folly::StringPiece contents);
+  std::pair<StoredBlob*, ObjectId> putBlob(folly::StringPiece contents);
   StoredBlob* putBlob(ObjectId hash, folly::StringPiece contents);
 
   /**
@@ -89,13 +89,13 @@ class FakeBackingStore final : public BackingStore {
    * The boolean in the return value is true if a new StoredBlob was created by
    * this call, or false if a StoredBlob already existed with this hash.
    */
-  std::pair<StoredBlob*, bool> maybePutBlob(folly::StringPiece contents);
-  std::pair<StoredBlob*, bool> maybePutBlob(
+  std::tuple<StoredBlob*, ObjectId, bool> maybePutBlob(
+      folly::StringPiece contents);
+  std::tuple<StoredBlob*, ObjectId, bool> maybePutBlob(
       ObjectId hash,
       folly::StringPiece contents);
 
   static Blob makeBlob(folly::StringPiece contents);
-  static Blob makeBlob(ObjectId hash, folly::StringPiece contents);
 
   /**
    * Helper functions for building a tree.
@@ -212,13 +212,15 @@ enum class FakeBlobType {
  * initialier-list arguments.
  */
 struct FakeBackingStore::TreeEntryData {
+  // blob
   TreeEntryData(
       folly::StringPiece name,
-      const Blob& blob,
+      const ObjectId& id,
       FakeBlobType type = FakeBlobType::REGULAR_FILE);
+  // blob
   TreeEntryData(
       folly::StringPiece name,
-      const StoredBlob* blob,
+      const std::pair<StoredBlob*, ObjectId>& blob,
       FakeBlobType type = FakeBlobType::REGULAR_FILE);
   // tree
   TreeEntryData(folly::StringPiece name, const Tree& tree);

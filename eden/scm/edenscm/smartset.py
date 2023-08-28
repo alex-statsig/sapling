@@ -52,7 +52,7 @@ def _formatsetrepr(r):
         return repr(r)
 
 
-class abstractsmartset(object):
+class abstractsmartset:
     def __nonzero__(self):
         """True if the smartset is not empty"""
         raise NotImplementedError()
@@ -211,9 +211,8 @@ class abstractsmartset(object):
 
         This is part of the mandatory API for smartset."""
         c = other.__contains__
-        return self.filter(
-            lambda r: not c(r), condrepr=("<not %r>", other), cache=False
-        )
+        r = self.filter(lambda r: not c(r), condrepr=("<not %r>", other), cache=False)
+        return r.prefetch(*other.prefetchfields())
 
     def filter(self, condition, condrepr=None, cache=True):
         """Returns this smartset filtered by condition as a new smartset.
@@ -224,7 +223,7 @@ class abstractsmartset(object):
 
         This is part of the mandatory API for smartset."""
         # builtin cannot be cached. but do not needs to
-        if cache and util.safehasattr(condition, "func_code"):
+        if cache and hasattr(condition, "func_code"):
             condition = util.cachefunc(condition)
         return filteredset(self, condition, condrepr)
 
@@ -252,11 +251,8 @@ class abstractsmartset(object):
             ys, datarepr=("slice=%d:%d %r", start, stop, self), repo=self.repo()
         )
 
-    def clone(self):
-        return copy.copy(self)
-
     def prefetch(self, *fields):
-        """return a smartset with given fields marked as "need prefetch"
+        """return self with given fields marked as "need prefetch"
 
         Available fields:
         - "text": commit message
@@ -264,9 +260,8 @@ class abstractsmartset(object):
         Note:
         'iterctx()' respects the prefetch metadata.
         """
-        newobj = self.clone()
-        newobj._prefetchfields = set(fields) | self.prefetchfields()
-        return newobj
+        self._prefetchfields = set(fields) | self.prefetchfields()
+        return self
 
     def prefetchbytemplate(self, repo, templ):
         """parse a template string and decide what to prefetch"""
@@ -1180,6 +1175,13 @@ class filteredset(abstractsmartset):
             xs.append(s)
         return "<%s %s>" % (type(self).__name__, ", ".join(xs))
 
+    def prefetch(self, *fields):
+        self._subset.prefetch(*fields)
+        return self
+
+    def prefetchfields(self):
+        return self._subset.prefetchfields()
+
 
 def _iterordered(ascending, iter1, iter2):
     """produce an ordered iteration from two iterators with the same order
@@ -1715,10 +1717,6 @@ class fullreposet(nameset):
         s.__class__ = cls
         return s
 
-    def clone(self):
-        # cannot use copy.copy because __new__ is incompatible
-        return fullreposet(self.repo())
-
     def __init__(cls, repo):
         # __new__ takes care of things
         pass
@@ -1730,7 +1728,7 @@ class fullreposet(nameset):
         This boldly assumes the other contains valid revs only.
         """
         # other not a smartset, make is so
-        if not util.safehasattr(other, "isascending"):
+        if not hasattr(other, "isascending"):
             # filter out hidden revision
             # (this boldly assumes all smartset are pure)
             #

@@ -37,6 +37,7 @@ use types::RepoPathBuf;
 use crate::CopyTrace;
 use crate::DagCopyTrace;
 use crate::MetadataRenameFinder;
+use crate::TraceResult;
 
 #[derive(Clone)]
 struct CopyTraceTestCase {
@@ -256,20 +257,36 @@ fn vertex_from_str(s: &str) -> Vertex {
 }
 
 macro_rules! assert_trace_rename {
-    ($copy_trace:ident $src:tt $dst:tt, $src_path:tt -> $dst_path:tt) => {{
+    ($copy_trace:ident $src:tt $dst:tt, $src_path:tt -> $($o:tt)*) => {{
         let src = vertex_from_str(stringify!($src));
         let dst = vertex_from_str(stringify!($dst));
         let src_path = RepoPath::from_str(stringify!($src_path).trim_matches('"'))
             .unwrap()
             .to_owned();
-        let dst_path = match stringify!($dst_path).trim_matches('"') {
-            "!" => None,
-            p => Some(RepoPath::from_str(p).unwrap().to_owned()),
+        let expected = stringify!($($o)*).trim_matches('"');
+        let expected_result = match &expected[..1] {
+            "!" => {
+                if expected.len() == 1 {
+                    TraceResult::NotFound
+                } else {
+                    let items: Vec<&str> = expected.split(" ").collect();
+                    match items[1] {
+                        "-" => TraceResult::Deleted(
+                            vertex_from_str(items[2]),
+                            RepoPath::from_str(items[3]).unwrap().to_owned()
+                        ),
+                        "+" => TraceResult::Added(
+                            vertex_from_str(items[2]),
+                            RepoPath::from_str(items[3]).unwrap().to_owned()),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            _ => TraceResult::Renamed(RepoPath::from_str(&expected).unwrap().to_owned()),
         };
 
-        let res = $copy_trace.trace_rename(src, dst, src_path).await.unwrap();
-
-        assert_eq!(res, dst_path);
+        let trace_result = $copy_trace.trace_rename(src, dst, src_path).await.unwrap();
+        assert_eq!(trace_result, expected_result);
     }};
 }
 
@@ -369,10 +386,10 @@ async fn test_linear_multiple_renames_with_deletes() {
     let c = t.copy_trace().await;
 
     assert_trace_rename!(c A X, a -> d);
-    assert_trace_rename!(c A Z, a -> !);
+    assert_trace_rename!(c A Z, a -> !-Z d);
 
     assert_trace_rename!(c Z B, b2 -> b2);
-    assert_trace_rename!(c Z A, b2 -> !);
+    assert_trace_rename!(c Z A, b2 -> !+B b2);
 }
 
 #[tokio::test]
@@ -432,8 +449,8 @@ async fn test_non_linear_multiple_renames_with_deletes() {
     let c = t.copy_trace().await;
 
     assert_trace_rename!(c Z 1000, a2 -> d);
-    assert_trace_rename!(c Z 1001, a2 -> !);
-    assert_trace_rename!(c Z 1023, a2 -> !);
+    assert_trace_rename!(c Z 1001, a2 -> !-1001 d);
+    assert_trace_rename!(c Z 1023, a2 -> !-1001 d);
 }
 
 #[tokio::test]

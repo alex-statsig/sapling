@@ -1,6 +1,4 @@
-#chg-compatible
 #debugruntest-compatible
-  $ setconfig workingcopy.ruststatus=False
   $ setconfig experimental.allowfilepeer=True
 
   $ enable amend commitcloud infinitepush remotenames

@@ -5,8 +5,8 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
 
+  $ configure modernclient
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig workingcopy.ruststatus=False status.use-rust=false
 
   $ cat >> $HGRCPATH << 'EOF'
   > [extensions]
@@ -24,8 +24,7 @@
 # Make sure obs-based shelve can be used with an empty repo
 
   $ cd "$TESTTMP"
-  $ hg init obsrepo
-  $ cd obsrepo
+  $ newclientrepo obsrepo
 
   $ mkdir a b
   $ echo a > a/a
@@ -458,7 +457,7 @@
   rebasing shelved changes
   rebasing * "shelve changes to: second" (glob)
   merging a/a
-  note: rebase of * created no changes to commit (glob)
+  note: not rebasing *, its destination (rebasing onto) commit already has all its changes (glob)
   $ hg shelve -l
   $ hg status
   M a/a
@@ -514,8 +513,7 @@
 
 # Shelve should leave dirstate clean (issue4055)
 
-  $ hg init obsshelverebase
-  $ cd obsshelverebase
+  $ newclientrepo
   $ printf 'x\ny\n' > x
   $ echo z > z
   $ hg commit -Aqm xy
@@ -542,8 +540,7 @@
 
 # Shelve should only unshelve pending changes (issue4068)
 
-  $ hg init obssh-onlypendingchanges
-  $ cd obssh-onlypendingchanges
+  $ newclientrepo
   $ touch a
   $ hg ci -Aqm a
   $ touch b
@@ -777,7 +774,7 @@
   continue: hg unshelve --continue
   $ hg unshelve -c
   rebasing * "shelve changes to: second" (glob)
-  note: rebase of * created no changes to commit (glob)
+  note: not rebasing *, its destination (rebasing onto) commit already has all its changes (glob)
   unshelve of 'default' complete
   $ hg bookmark
   * test                      * (glob)
@@ -952,7 +949,7 @@
 # Test .orig files go where the user wants them to
 # ---------------------------------------------------------------
 
-  $ newrepo obssh-salvage
+  $ newclientrepo obssh-salvage
   $ echo content > root
   $ hg commit -A -m root -q
   $ echo '' > root
@@ -1046,8 +1043,7 @@
 # unknown state after unshelve if and only if it was either absent or unknown
 # before the unshelve operation.
 
-  $ hg init obssh-unknowns
-  $ cd obssh-unknowns
+  $ newclientrepo
 
 # The simplest case is if I simply have an unknown file that I shelve and unshelve
 
@@ -1110,8 +1106,7 @@
 
 # Prepare unshelve with a corrupted shelvedstate
 
-  $ hg init obssh-r1
-  $ cd obssh-r1
+  $ newclientrepo
   $ echo text1 > file
   $ hg add file
   $ hg shelve
@@ -1153,8 +1148,7 @@
 
 # Unshelve respects --keep even if user intervention is needed
 
-  $ hg init obs-unshelvekeep
-  $ cd obs-unshelvekeep
+  $ newclientrepo
   $ echo 1 > file
   $ hg ci -Am 1
   adding file
@@ -1186,8 +1180,7 @@
 
 # Unshelving a stripped commit aborts with an explanatory message
 
-  $ hg init obs-unshelve-stripped-commit
-  $ cd obs-unshelve-stripped-commit
+  $ newclientrepo
   $ echo 1 > file
   $ hg ci -Am 1
   adding file
@@ -1206,8 +1199,7 @@
 # Test revsetpredicate 'shelved'
 # For this test enabled shelve extension is enough, and it is enabled at the top of the file
 
-  $ hg init test-log-shelved
-  $ cd test-log-shelved
+  $ newclientrepo
 
   $ testshelvedcount() {
   >   local count=$(hg log -r "shelved()" -T "{node}\n" | wc -l)
@@ -1251,7 +1243,7 @@
 
 # Test interrupted shelve - this should not lose work
 
-  $ newrepo
+  $ newclientrepo
   $ echo 1 > file1
   $ echo 1 > file2
   $ hg commit -Aqm commit1

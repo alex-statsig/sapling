@@ -1,6 +1,4 @@
-#chg-compatible
-This test is broken while conch_parser is broken
-#require false
+#debugruntest-compatible
 
 
 Classic .t test:
@@ -23,24 +21,34 @@ Classic .t test:
   >   not found as expected
   > EOF
 
+Refer to last output as "_":
+
+  $ cat > test-last.t << 'EOF'
+  >   $ echo 123
+  >   123
+  >   >>> _ == "123\n"
+  >   True
+  >   >>> assert _ == "True\n"
+  > EOF
+
 Vanilla Python test:
 
   $ cat > test-py-vanilla.t << 'EOF'
-  > a = 1
-  > b = 2
-  > assert a != b
+  >     a = 1
+  >     b = 2
+  >     assert a != b
   > EOF
 
 Python / .t hybrid:
 
   $ cat > test-py-hybrid.t << 'EOF'
-  > for i in range(3):
-  >     setenv("A", str(i))
-  >     setenv("B", str(i))
-  >     $ [ $A -eq $B ] && echo same
-  >     same
-  >     $ echo $A
-  >     [012] (re)
+  >     for i in range(3):
+  >         setenv("A", str(i))
+  >         setenv("B", str(i))
+  >         $ [ $A -eq $B ] && echo same
+  >         same
+  >         $ echo $A
+  >         [012] (re)
   > EOF
 
 Diff output:
@@ -66,7 +74,14 @@ Skip:
 Exception:
 
   $ cat > test-py-exc.t << 'EOF'
-  > raise ValueError('this test is broken')
+  >     raise ValueError('this test is broken')
+  > EOF
+
+AssertionError fails the test even if output matches:
+
+  $ cat > test-assert.t << 'EOF'
+  >   >>> assert False
+  >   AssertionError!
   > EOF
 
 Test output:
@@ -81,6 +96,9 @@ Test output:
   # Ran 1 tests, 0 skipped, 0 failed.
 
   $ hg debugruntest -j1 test-*.t test-foo.t test-bar.t
+  test-assert.t ----------------------------------------------------------------
+     1 >>> assert False
+  
   test-fail-sh.t ---------------------------------------------------------------
      1 $ seq 3
       -0
@@ -108,13 +126,14 @@ Test output:
     test-bar.t
     test-foo.t
   
-  Failed 1 test (output mismatch):
+  Failed 2 tests (output mismatch):
+    test-assert.t
     test-fail-sh.t
   
   Failed 1 test (this test is broken):
     test-py-exc.t
   
-  # Ran 8 tests, 1 skipped, 4 failed.
+  # Ran 10 tests, 1 skipped, 5 failed.
   [1]
 
 Autofix:
@@ -140,8 +159,6 @@ Autofix:
     * (glob)
     3
 
-
-#if no-bash
 Doctest:
 
   $ cat >> testmodule.py << 'EOF'
@@ -226,4 +243,3 @@ The doctest passes with the autofix changes:
   $ hg debugruntest doctest:testmodule
   # Ran 1 tests, 0 skipped, 0 failed.
 
-#endif

@@ -12,6 +12,7 @@ import type {Comparison} from 'shared/Comparison';
 import type {Writable} from 'shared/typeUtils';
 
 import {encodeSaplingDiffUri} from './DiffContentProvider';
+import SaplingFileDecorationProvider from './SaplingFileDecorationProvider';
 import {getCLICommand} from './config';
 import {t} from './i18n';
 import {Repository} from 'isl-server/src/Repository';
@@ -19,57 +20,87 @@ import {repositoryCache} from 'isl-server/src/RepositoryCache';
 import {ComparisonType} from 'shared/Comparison';
 import * as vscode from 'vscode';
 
-/**
- * Construct Repositories and VSCodeRepos for every workspace folder.
- * Treats repositoryCache as the source of truth for re-using repositories.
- */
-export function watchAndCreateRepositoriesForWorkspaceFolders(logger: Logger): vscode.Disposable {
-  const knownRepos = new Map<string, RepositoryReference>();
-  const vscodeRepos = new Map<string, VSCodeRepo>();
-  function updateRepos(
+export class VSCodeReposList {
+  private knownRepos = new Map</* attached folder root */ string, RepositoryReference>();
+  private vscodeRepos = new Map</* repo root path */ string, VSCodeRepo>();
+  private disposables: Array<vscode.Disposable> = [];
+
+  private reposByPath = new Map</* arbitrary subpath of repo */ string, VSCodeRepo>();
+
+  constructor(private logger: Logger) {
+    if (vscode.workspace.workspaceFolders) {
+      this.updateRepos(vscode.workspace.workspaceFolders, []);
+    }
+    this.disposables.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(e => {
+        this.updateRepos(e.added, e.removed);
+      }),
+    );
+    // TODO: consider also listening for vscode.workspace.onDidOpenTextDocument to support repos
+    // for ad-hoc non-workspace-folder files
+  }
+
+  private updateRepos(
     added: ReadonlyArray<vscode.WorkspaceFolder>,
     removed: ReadonlyArray<vscode.WorkspaceFolder>,
   ) {
     for (const add of added) {
       const {fsPath} = add.uri;
-      if (knownRepos.has(fsPath)) {
+      if (this.knownRepos.has(fsPath)) {
         throw new Error(`Attempted to add workspace folder path twice: ${fsPath}`);
       }
-      const repoReference = repositoryCache.getOrCreate(getCLICommand(), logger, fsPath);
-      knownRepos.set(fsPath, repoReference);
+      const repoReference = repositoryCache.getOrCreate(getCLICommand(), this.logger, fsPath);
+      this.knownRepos.set(fsPath, repoReference);
       repoReference.promise.then(repo => {
         if (repo instanceof Repository) {
           const root = repo?.info.repoRoot;
-          const existing = vscodeRepos.get(root);
+          const existing = this.vscodeRepos.get(root);
           if (existing) {
             return;
           }
-          const vscodeRepo = new VSCodeRepo(repo, logger);
-          vscodeRepos.set(root, vscodeRepo);
+          const vscodeRepo = new VSCodeRepo(repo, this.logger);
+          this.vscodeRepos.set(root, vscodeRepo);
           repo.onDidDispose(() => {
             vscodeRepo.dispose();
-            vscodeRepos.delete(root);
+            this.vscodeRepos.delete(root);
           });
         }
       });
     }
     for (const remove of removed) {
       const {fsPath} = remove.uri;
-      const repo = knownRepos.get(fsPath);
+      const repo = this.knownRepos.get(fsPath);
       repo?.unref();
-      knownRepos.delete(fsPath);
+      this.knownRepos.delete(fsPath);
     }
   }
-  if (vscode.workspace.workspaceFolders) {
-    updateRepos(vscode.workspace.workspaceFolders, []);
+
+  /** return the VSCodeRepo that contains the given path */
+  public repoForPath(path: string): VSCodeRepo | undefined {
+    if (this.reposByPath.has(path)) {
+      return this.reposByPath.get(path);
+    }
+    for (const value of this.vscodeRepos.values()) {
+      if (path.startsWith(value.rootPath)) {
+        return value;
+      }
+    }
+    return undefined;
   }
-  return vscode.workspace.onDidChangeWorkspaceFolders(e => {
-    updateRepos(e.added, e.removed);
-  });
-  // TODO: consider also listening for vscode.workspace.onDidOpenTextDocument to support repos
-  // for ad-hoc non-workspace-folder files
+
+  public dispose() {
+    for (const disposable of this.disposables) {
+      disposable.dispose();
+    }
+  }
 }
 
+type SaplingResourceState = vscode.SourceControlResourceState & {
+  status?: string;
+};
+export type SaplingResourceGroup = vscode.SourceControlResourceGroup & {
+  resourceStates: SaplingResourceState[];
+};
 /**
  * vscode-API-compatible repository.
  * This handles vscode-api integrations, but defers to Repository for any actual work.
@@ -79,13 +110,15 @@ export class VSCodeRepo implements vscode.QuickDiffProvider {
   private sourceControl: vscode.SourceControl;
   private resourceGroups: Record<
     'changes' | 'untracked' | 'unresolved' | 'resolved',
-    vscode.SourceControlResourceGroup
+    SaplingResourceGroup
   >;
-  private rootUri: vscode.Uri;
+  public rootUri: vscode.Uri;
+  public rootPath: string;
 
   constructor(public repo: Repository, private logger: Logger) {
     repo.onDidDispose(() => this.dispose());
     this.rootUri = vscode.Uri.file(repo.info.repoRoot);
+    this.rootPath = repo.info.repoRoot;
 
     this.sourceControl = vscode.scm.createSourceControl(
       'sapling',
@@ -108,6 +141,7 @@ export class VSCodeRepo implements vscode.QuickDiffProvider {
       group.hideWhenEmpty = true;
     }
 
+    const fileDecorationProvider = new SaplingFileDecorationProvider(this, logger);
     this.disposables.push(
       repo.subscribeToUncommittedChanges(() => {
         this.updateResourceGroups();
@@ -115,6 +149,7 @@ export class VSCodeRepo implements vscode.QuickDiffProvider {
       repo.onChangeConflictState(() => {
         this.updateResourceGroups();
       }),
+      fileDecorationProvider,
     );
     this.updateResourceGroups();
   }
@@ -126,14 +161,14 @@ export class VSCodeRepo implements vscode.QuickDiffProvider {
     // only show merge conflicts if they are given
     const fileChanges = conflicts ?? data?.files?.value ?? [];
 
-    const changes: Array<vscode.SourceControlResourceState> = [];
-    const untracked: Array<vscode.SourceControlResourceState> = [];
-    const unresolved: Array<vscode.SourceControlResourceState> = [];
-    const resolved: Array<vscode.SourceControlResourceState> = [];
+    const changes: Array<SaplingResourceState> = [];
+    const untracked: Array<SaplingResourceState> = [];
+    const unresolved: Array<SaplingResourceState> = [];
+    const resolved: Array<SaplingResourceState> = [];
 
     for (const change of fileChanges) {
       const uri = vscode.Uri.joinPath(this.rootUri, change.path);
-      const resource: vscode.SourceControlResourceState = {
+      const resource: SaplingResourceState = {
         command: {
           command: 'vscode.open',
           title: 'Open',
@@ -141,6 +176,7 @@ export class VSCodeRepo implements vscode.QuickDiffProvider {
         },
         resourceUri: uri,
         decorations: this.decorationForChange(change),
+        status: change.status,
       };
       switch (change.status) {
         case '?':
@@ -165,6 +201,10 @@ export class VSCodeRepo implements vscode.QuickDiffProvider {
 
     // don't include resolved files in count
     this.sourceControl.count = changes.length + untracked.length + unresolved.length;
+  }
+
+  public getResourceGroups() {
+    return this.resourceGroups;
   }
 
   public dispose() {
@@ -226,5 +266,3 @@ const themeColors = {
   untracked: new vscode.ThemeColor('gitDecoration.untrackedResourceForeground'),
   conflicting: new vscode.ThemeColor('gitDecoration.conflictingResourceForeground'),
 };
-
-export const __TEST__ = {watchAndCreateRepositoriesForWorkspaceFolders};

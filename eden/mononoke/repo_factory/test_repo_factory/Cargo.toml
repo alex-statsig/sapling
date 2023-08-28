@@ -38,6 +38,7 @@ filenodes = { version = "0.1.0", path = "../../filenodes" }
 filenodes_derivation = { version = "0.1.0", path = "../../derived_data/filenodes_derivation" }
 filestore = { version = "0.1.0", path = "../../filestore" }
 fsnodes = { version = "0.1.0", path = "../../derived_data/fsnodes" }
+git_symbolic_refs = { version = "0.1.0", path = "../../git_symbolic_refs" }
 git_types = { version = "0.1.0", path = "../../git/git_types" }
 hooks = { version = "0.1.0", path = "../../hooks" }
 hooks_content_stores = { version = "0.1.0", path = "../../hooks/content-stores" }
@@ -55,7 +56,7 @@ newfilenodes = { version = "0.1.0", path = "../../newfilenodes" }
 phases = { version = "0.1.0", path = "../../phases" }
 pushrebase_mutation_mapping = { version = "0.1.0", path = "../../pushrebase_mutation_mapping" }
 redactedblobstore = { version = "0.1.0", path = "../../blobstore/redactedblobstore" }
-regex = "1.6.0"
+regex = "1.9.2"
 rendezvous = { version = "0.1.0", path = "../../common/rendezvous" }
 repo_blobstore = { version = "0.1.0", path = "../../blobrepo/repo_blobstore" }
 repo_bookmark_attrs = { version = "0.1.0", path = "../../repo_attributes/repo_bookmark_attrs" }

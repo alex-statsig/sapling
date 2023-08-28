@@ -67,11 +67,10 @@ TEST_P(LocalStoreTest, testReadAndWriteBlob) {
   auto buf =
       folly::IOBuf{folly::IOBuf::WRAP_BUFFER, folly::ByteRange{contents}};
 
-  auto inBlob = Blob{hash, std::move(buf)};
+  auto inBlob = Blob{std::move(buf)};
   store_->putBlob(hash, &inBlob);
 
   auto outBlob = store_->getBlob(hash).get(10s);
-  EXPECT_EQ(hash.asHexString(), outBlob->getHash().asHexString());
   EXPECT_EQ(
       contents, outBlob->getContents().clone()->moveToFbString().toStdString());
 

@@ -204,7 +204,6 @@ class EdenMount::JournalDiffCallback : public DiffCallback {
   folly::Synchronized<Data> data_;
 };
 
-constexpr int EdenMount::kMaxSymlinkChainDepth;
 static constexpr folly::StringPiece kEdenStracePrefix = "eden.strace.";
 
 // We compute this when the process is initialized, but stash a copy
@@ -230,7 +229,8 @@ std::shared_ptr<EdenMount> EdenMount::create(
     std::shared_ptr<ServerState> serverState,
     std::unique_ptr<Journal> journal,
     EdenStatsPtr stats,
-    std::optional<Overlay::InodeCatalogType> inodeCatalogType) {
+    std::optional<InodeCatalogType> inodeCatalogType,
+    std::optional<InodeCatalogOptions> inodeCatalogOptions) {
   return std::shared_ptr<EdenMount>{
       new EdenMount{
           std::move(config),
@@ -239,7 +239,8 @@ std::shared_ptr<EdenMount> EdenMount::create(
           std::move(serverState),
           std::move(journal),
           std::move(stats),
-          std::move(inodeCatalogType)},
+          std::move(inodeCatalogType),
+          std::move(inodeCatalogOptions)},
       EdenMountDeleter{}};
 }
 
@@ -250,7 +251,8 @@ EdenMount::EdenMount(
     std::shared_ptr<ServerState> serverState,
     std::unique_ptr<Journal> journal,
     EdenStatsPtr stats,
-    std::optional<Overlay::InodeCatalogType> inodeCatalogType)
+    std::optional<InodeCatalogType> inodeCatalogType,
+    std::optional<InodeCatalogOptions> inodeCatalogOptions)
     : checkoutConfig_{std::move(checkoutConfig)},
       serverState_{std::move(serverState)},
 #ifdef _WIN32
@@ -266,8 +268,10 @@ EdenMount::EdenMount(
           checkoutConfig_->getOverlayPath(),
           checkoutConfig_->getCaseSensitive(),
           getInodeCatalogType(inodeCatalogType),
+          getInodeCatalogOptions(inodeCatalogOptions),
           serverState_->getStructuredLogger(),
           std::move(stats),
+          checkoutConfig_->getEnableWindowsSymlinks(),
           *serverState_->getEdenConfig())},
 #ifndef _WIN32
       overlayFileAccess_{
@@ -288,34 +292,54 @@ EdenMount::EdenMount(
   subscribeInodeActivityBuffer();
 }
 
-Overlay::InodeCatalogType EdenMount::getInodeCatalogType(
-    std::optional<Overlay::InodeCatalogType> inodeCatalogType) {
+InodeCatalogType EdenMount::getInodeCatalogType(
+    std::optional<InodeCatalogType> inodeCatalogType) {
+  // InodCatalogType is determined by:
+  //   1. optional parameter (`inodeCatalogType`) provided by caller - used by
+  //        test code
+  //   2. optional inode-catalog-type setting in CheckoutConfig
+  //        (`checkoutConfig_->getInodeCatalogType()`)
+  //   3. enable-sqlite-overlay setting in CheckoutConfig
+  //        (`checkoutConfig_->getEnableSqliteOverlay()`)
+  //     a. True -> variant of Sqlite
+  //     b. False -> from EdenConfig
+
   if (inodeCatalogType.has_value()) {
     return inodeCatalogType.value();
   }
 
-  if (checkoutConfig_->getEnableSqliteOverlay()) {
-    if (getEdenConfig()->unsafeInMemoryOverlay.getValue()) {
-      if (getEdenConfig()->overlayBuffered.getValue()) {
-        return Overlay::InodeCatalogType::SqliteInMemoryBuffered;
-      } else {
-        return Overlay::InodeCatalogType::SqliteInMemory;
-      }
-    }
-    if (getEdenConfig()->overlaySynchronousMode.getValue() == "off") {
-      if (getEdenConfig()->overlayBuffered.getValue()) {
-        return Overlay::InodeCatalogType::SqliteSynchronousOffBuffered;
-      } else {
-        return Overlay::InodeCatalogType::SqliteSynchronousOff;
-      }
-    }
-    if (getEdenConfig()->overlayBuffered.getValue()) {
-      return Overlay::InodeCatalogType::SqliteBuffered;
-    }
-    return Overlay::InodeCatalogType::Sqlite;
-  } else {
-    return Overlay::InodeCatalogType::Legacy;
+  if (checkoutConfig_->getInodeCatalogType().has_value()) {
+    return checkoutConfig_->getInodeCatalogType().value();
   }
+
+  if (checkoutConfig_->getEnableSqliteOverlay()) {
+    return InodeCatalogType::Sqlite;
+  } else {
+    return serverState_->getEdenConfig()->inodeCatalogType.getValue();
+  }
+}
+
+InodeCatalogOptions EdenMount::getInodeCatalogOptions(
+    std::optional<InodeCatalogOptions> inodeCatalogOptions) {
+  if (inodeCatalogOptions.has_value()) {
+    return inodeCatalogOptions.value();
+  }
+
+  auto options = INODE_CATALOG_DEFAULT;
+
+  if (getEdenConfig()->unsafeInMemoryOverlay.getValue()) {
+    options |= INODE_CATALOG_UNSAFE_IN_MEMORY;
+  }
+
+  if (getEdenConfig()->overlaySynchronousMode.getValue() == "off") {
+    options |= INODE_CATALOG_SYNCHRONOUS_OFF;
+  }
+
+  if (getEdenConfig()->overlayBuffered.getValue()) {
+    options |= INODE_CATALOG_BUFFERED;
+  }
+
+  return options;
 }
 
 FOLLY_NODISCARD folly::Future<folly::Unit> EdenMount::initialize(
@@ -344,58 +368,52 @@ FOLLY_NODISCARD folly::Future<folly::Unit> EdenMount::initialize(
             .semi()
             .via(&folly::QueuedImmediateExecutor::instance());
       })
-      .thenValue([this,
-                  progressCallback = std::move(progressCallback),
-                  parent,
-                  workingCopyParentRootId = parentCommit.getWorkingCopyParent(),
-                  inProgressCheckout = parentCommit.isCheckoutInProgress(),
-                  checkoutOriginalDest = parentCommit.getLastCheckoutId(
-                      ParentCommit::RootIdPreference::To),
-                  checkoutOriginalSrc = parentCommit.getLastCheckoutId(
+      .thenValue(
+          [this,
+           progressCallback = std::move(progressCallback),
+           parent,
+           parentCommit](ObjectStore::GetRootTreeResult parentTree) mutable {
+            ParentCommitState::CheckoutState checkoutState =
+                ParentCommitState::NoOngoingCheckout{};
+            if (parentCommit.isCheckoutInProgress()) {
+              checkoutState = ParentCommitState::InterruptedCheckout{
+                  *parentCommit.getLastCheckoutId(
                       ParentCommit::RootIdPreference::From),
-                  checkoutPid = parentCommit.getInProgressPid()](
-                     std::shared_ptr<const Tree> parentTree) mutable {
-        std::optional<std::tuple<RootId, RootId>> originalCheckoutTrees =
-            std::nullopt;
-        if (inProgressCheckout) {
-          originalCheckoutTrees = {std::make_tuple(
-              checkoutOriginalSrc.value(), checkoutOriginalDest.value())};
-        }
-        *parentState_.wlock() = ParentCommitState{
-            parent,
-            parentTree,
-            workingCopyParentRootId,
-            inProgressCheckout,
-            originalCheckoutTrees,
-            checkoutPid,
-        };
+                  *parentCommit.getLastCheckoutId(
+                      ParentCommit::RootIdPreference::To)};
+            }
 
-        // Record the transition from no snapshot to the current snapshot in
-        // the journal.  This also sets things up so that we can carry the
-        // snapshot id forward through subsequent journal entries.
-        journal_->recordHashUpdate(parent);
+            *parentState_.wlock() = ParentCommitState{
+                parent,
+                parentTree.tree,
+                parentCommit.getWorkingCopyParent(),
+                std::move(checkoutState)};
 
-        // Initialize the overlay.
-        // This must be performed before we do any operations that may
-        // allocate inode numbers, including creating the root TreeInode.
-        return overlay_
-            ->initialize(
-                getEdenConfig(),
-                getPath(),
-                std::move(progressCallback),
-                [this](
-                    const std::shared_ptr<const Tree>& parentTree,
-                    RelativePathPiece path) {
-                  return ::facebook::eden::getTreeOrTreeEntry(
-                      parentTree ? parentTree : getCheckedOutRootTree(),
-                      path,
-                      objectStore_,
-                      context.copy());
-                })
-            .deferValue([parentTree = std::move(parentTree)](auto&&) mutable {
-              return parentTree;
-            });
-      })
+            // Record the transition from no snapshot to the current snapshot in
+            // the journal.  This also sets things up so that we can carry the
+            // snapshot id forward through subsequent journal entries.
+            journal_->recordHashUpdate(parent);
+
+            // Initialize the overlay.
+            // This must be performed before we do any operations that may
+            // allocate inode numbers, including creating the root TreeInode.
+            return overlay_
+                ->initialize(
+                    getEdenConfig(),
+                    getPath(),
+                    std::move(progressCallback),
+                    [this](
+                        const std::shared_ptr<const Tree>& parentTree,
+                        RelativePathPiece path) {
+                      return ::facebook::eden::getTreeOrTreeEntry(
+                          parentTree ? parentTree : getCheckedOutRootTree(),
+                          path,
+                          objectStore_,
+                          context.copy());
+                    })
+                .deferValue([parentTree = std::move(parentTree.tree)](
+                                auto&&) mutable { return parentTree; });
+          })
       .thenValue([this, takeover](std::shared_ptr<const Tree> parentTree) {
         auto initTreeNode = createRootInode(std::move(parentTree));
         if (takeover) {
@@ -954,7 +972,7 @@ folly::SemiFuture<SerializedInodeMap> EdenMount::shutdown(
       !tryToTransitionState(State::INIT_ERROR, State::SHUTTING_DOWN) &&
       !tryToTransitionState(State::FUSE_ERROR, State::SHUTTING_DOWN)) {
     EDEN_BUG() << "attempted to call shutdown() on a non-running EdenMount: "
-               << "state was " << getState();
+               << "state was " << fmt::underlying(getState());
   }
 
   // The caller calls us with the EdenServer::mountPoints_ lock, make sure that
@@ -985,53 +1003,48 @@ folly::SemiFuture<SerializedInodeMap> EdenMount::shutdownImpl(bool doTakeover) {
       });
 }
 
-folly::Future<folly::Unit> EdenMount::unmount() {
-  return folly::makeFutureWith([this] {
-    auto mountingUnmountingState = mountingUnmountingState_.wlock();
-    if (mountingUnmountingState->fsChannelUnmountStarted()) {
-      return mountingUnmountingState->fsChannelUnmountPromise->getFuture();
-    }
-    mountingUnmountingState->fsChannelUnmountPromise.emplace();
-    if (!mountingUnmountingState->fsChannelMountStarted()) {
-      return folly::makeFuture();
-    }
-    auto mountFuture =
-        mountingUnmountingState->fsChannelMountPromise->getFuture();
-    mountingUnmountingState.unlock();
+folly::SemiFuture<folly::Unit> EdenMount::unmount() {
+  auto mountingUnmountingState = mountingUnmountingState_.wlock();
+  if (mountingUnmountingState->fsChannelUnmountStarted()) {
+    return mountingUnmountingState->fsChannelUnmountPromise->getFuture();
+  }
+  mountingUnmountingState->fsChannelUnmountPromise.emplace();
+  if (!mountingUnmountingState->fsChannelMountStarted()) {
+    return folly::makeFuture();
+  }
+  auto mountFuture =
+      mountingUnmountingState->fsChannelMountPromise->getFuture();
+  mountingUnmountingState.unlock();
 
-    return std::move(mountFuture)
-        .thenTry([this](Try<Unit>&& mountResult) {
-          if (mountResult.hasException()) {
-            return folly::makeFuture();
-          }
-#ifdef _WIN32
-          if (auto* channel = getPrjfsChannel()) {
-            return channel->stop()
-                .via(getServerThreadPool().get())
-                .ensure([this] { channel_.reset(); });
-          } else {
-            return folly::makeFutureWith([]() { NOT_IMPLEMENTED(); });
-          }
-#else
-          // TODO: teach windows to unmount NFS
-          if (getNfsdChannel() != nullptr) {
-            return serverState_->getPrivHelper()->nfsUnmount(getPath().view());
-          } else {
-            return serverState_->getPrivHelper()->fuseUnmount(getPath().view());
-          }
-#endif
-        })
-        .thenTry([this](Try<Unit>&& result) noexcept -> folly::Future<Unit> {
-          auto mountingUnmountingState = mountingUnmountingState_.wlock();
-          XDCHECK(mountingUnmountingState->fsChannelUnmountPromise.has_value());
-          folly::SharedPromise<folly::Unit>* unsafeUnmountPromise =
-              &*mountingUnmountingState->fsChannelUnmountPromise;
-          mountingUnmountingState.unlock();
+  return std::move(mountFuture)
+      .thenTry([this](Try<Unit>&& mountResult) {
+        if (mountResult.hasException()) {
+          return folly::makeSemiFuture();
+        }
+        if (!channel_) {
+          throw std::runtime_error(
+              "attempting to unmount() an EdenMount without an FsChannel");
+        }
+        // If a Future then callback returns a SemiFuture, that SemiFuture is
+        // attached to the implied InlineExecutor.
+        // Therefore, the the following callback will be guaranteed to be fixup
+        // the mountingUnmountingState, even if the returned SemiFuture is
+        // dropped.
+        // TODO: Is it safe to call FsChannel::unmount if the FuseChannel
+        // is in the process of starting? Or can we assume that
+        // mountResult.hasException() above covers that case?
+        return channel_->unmount();
+      })
+      .thenTry([this](Try<Unit>&& result) noexcept -> folly::Future<Unit> {
+        auto mountingUnmountingState = mountingUnmountingState_.wlock();
+        XDCHECK(mountingUnmountingState->fsChannelUnmountPromise.has_value());
+        folly::SharedPromise<folly::Unit>* unsafeUnmountPromise =
+            &*mountingUnmountingState->fsChannelUnmountPromise;
+        mountingUnmountingState.unlock();
 
-          unsafeUnmountPromise->setTry(Try<Unit>{result});
-          return folly::makeFuture<folly::Unit>(std::move(result));
-        });
-  });
+        unsafeUnmountPromise->setTry(Try<Unit>{result});
+        return folly::makeFuture<folly::Unit>(std::move(result));
+      });
 }
 
 const shared_ptr<UnboundedQueueExecutor>& EdenMount::getServerThreadPool()
@@ -1328,50 +1341,49 @@ ImmediateFuture<folly::Unit> EdenMount::waitForPendingWrites() const {
 folly::Future<CheckoutResult> EdenMount::checkout(
     TreeInodePtr rootInode,
     const RootId& snapshotHash,
-    std::optional<pid_t> clientPid,
+    OptionalProcessId clientPid,
     folly::StringPiece thriftMethodCaller,
     CheckoutMode checkoutMode) {
   const folly::stop_watch<> stopWatch;
   auto checkoutTimes = std::make_shared<CheckoutTimes>();
-  bool resumingCheckout = false;
 
+  ParentCommitState::CheckoutState oldState =
+      ParentCommitState::NoOngoingCheckout{};
   RootId oldParent;
   {
     auto parentLock = parentState_.wlock();
-    if (parentLock->checkoutInProgress) {
-      auto allowResume = getEdenConfig()->allowResumeCheckout.getValue();
-      auto optPid = parentLock->checkoutPid;
-      auto optTrees = parentLock->checkoutOriginalTrees;
-      if (allowResume && optTrees.has_value() && optPid.has_value() &&
-          optPid.value() != folly::get_cached_pid()) {
-        auto originalTrees = optTrees.value();
-        auto [src, dest] = originalTrees;
-        if (dest != snapshotHash) {
-          return makeFuture<CheckoutResult>(newEdenError(
-              EdenErrorType::CHECKOUT_IN_PROGRESS,
-              fmt::format(
-                  "a previous checkout was interrupted - please run 'hg update --clean {}' first",
-                  dest.value())));
-        } else {
-          oldParent = src;
-          resumingCheckout = true;
-        }
-      } else {
+    if (parentLock->isCheckoutInProgressOrInterrupted()) {
+      if (std::holds_alternative<ParentCommitState::CheckoutInProgress>(
+              parentLock->checkoutState)) {
         // Another update is already pending, we should bail.
         // TODO: Report the pid of the client that requested the first checkout
         // operation in this error
         return makeFuture<CheckoutResult>(newEdenError(
             EdenErrorType::CHECKOUT_IN_PROGRESS,
             "another checkout operation is still in progress"));
+      } else {
+        auto& interruptedCheckout =
+            std::get<ParentCommitState::InterruptedCheckout>(
+                parentLock->checkoutState);
+        if (interruptedCheckout.toCommit != snapshotHash) {
+          return makeFuture<CheckoutResult>(newEdenError(
+              EdenErrorType::CHECKOUT_IN_PROGRESS,
+              fmt::format(
+                  "a previous checkout was interrupted - please run 'hg update --clean {}' first",
+                  interruptedCheckout.toCommit)));
+        } else {
+          oldParent = interruptedCheckout.fromCommit;
+          oldState = interruptedCheckout;
+        }
       }
     } else {
-      // Set checkoutInProgress and release the lock. An alternative way of
-      // achieving the same would be to hold the lock during the checkout
-      // operation, but this might lead to deadlocks on Windows due to callbacks
-      // needing to access the parent commit to service callbacks.
-      parentLock->checkoutInProgress = true;
       oldParent = parentLock->workingCopyParentRootId;
     }
+    // Set checkoutInProgress and release the lock. An alternative way of
+    // achieving the same would be to hold the lock during the checkout
+    // operation, but this might lead to deadlocks on Windows due to callbacks
+    // needing to access the parent commit to service callbacks.
+    parentLock->checkoutState = ParentCommitState::CheckoutInProgress{};
   }
 
   auto ctx = std::make_shared<CheckoutContext>(
@@ -1400,55 +1412,70 @@ folly::Future<CheckoutResult> EdenMount::checkout(
             .semi()
             .via(&folly::QueuedImmediateExecutor::instance());
       })
-      .thenValue(
-          [this](std::tuple<shared_ptr<const Tree>, shared_ptr<const Tree>>
-                     treeResults) {
-            XLOG(DBG7) << "Checkout: waitForPendingWrites";
-            return waitForPendingWrites()
-                .thenValue([treeResults = std::move(treeResults)](auto&&) {
-                  return treeResults;
-                })
-                .semi();
-          })
-      .thenValue([this,
-                  rootInode,
-                  ctx,
-                  checkoutTimes,
-                  stopWatch,
-                  journalDiffCallback,
-                  resumingCheckout](
-                     std::tuple<shared_ptr<const Tree>, shared_ptr<const Tree>>
-                         treeResults) {
-        XLOG(DBG7) << "Checkout: performDiff";
-        checkoutTimes->didLookupTrees = stopWatch.elapsed();
-        // Call JournalDiffCallback::performDiff() to compute the changes
-        // between the original working directory state and the source
-        // tree state.
-        //
-        // If we are doing a dry-run update we aren't going to create a
-        // journal entry, so we can skip this step entirely.
-        if (ctx->isDryRun()) {
-          return folly::makeFuture(treeResults);
-        }
-
-        auto& fromTree = std::get<0>(treeResults);
-        auto trees = std::vector{fromTree};
-        if (resumingCheckout) {
-          trees.push_back(std::get<1>(treeResults));
-        }
-        return journalDiffCallback
-            ->performDiff(this, rootInode, std::move(trees))
-            .thenValue([ctx, journalDiffCallback, treeResults](
-                           const StatsFetchContext& diffFetchContext) {
-              ctx->getStatsContext().merge(diffFetchContext);
+      .thenValue([this](std::tuple<
+                        ObjectStore::GetRootTreeResult,
+                        ObjectStore::GetRootTreeResult> treeResults) {
+        XLOG(DBG7) << "Checkout: waitForPendingWrites";
+        return waitForPendingWrites()
+            .thenValue([treeResults = std::move(treeResults)](auto&&) {
               return treeResults;
             })
-            .semi()
-            .via(&folly::QueuedImmediateExecutor::instance());
+            .semi();
       })
+      .thenValue([this](std::tuple<
+                        ObjectStore::GetRootTreeResult,
+                        ObjectStore::GetRootTreeResult> treeResults) {
+        XLOG(DBG7) << "Checkout: waitForPendingWrites";
+        return waitForPendingWrites()
+            .thenValue([treeResults = std::move(treeResults)](auto&&) {
+              return treeResults;
+            })
+            .semi();
+      })
+      .thenValue(
+          [this,
+           rootInode,
+           ctx,
+           checkoutTimes,
+           stopWatch,
+           journalDiffCallback,
+           resumingCheckout =
+               std::holds_alternative<ParentCommitState::InterruptedCheckout>(
+                   oldState)](
+              std::tuple<
+                  IObjectStore::GetRootTreeResult,
+                  IObjectStore::GetRootTreeResult> treeResults) {
+            XLOG(DBG7) << "Checkout: performDiff";
+            checkoutTimes->didLookupTrees = stopWatch.elapsed();
+            // Call JournalDiffCallback::performDiff() to compute the changes
+            // between the original working directory state and the source
+            // tree state.
+            //
+            // If we are doing a dry-run update we aren't going to create a
+            // journal entry, so we can skip this step entirely.
+            if (ctx->isDryRun()) {
+              return folly::makeFuture(treeResults);
+            }
+
+            auto& fromTree = std::get<0>(treeResults);
+            auto trees = std::vector{fromTree.tree};
+            if (resumingCheckout) {
+              trees.push_back(std::get<1>(treeResults).tree);
+            }
+            return journalDiffCallback
+                ->performDiff(this, rootInode, std::move(trees))
+                .thenValue([ctx, journalDiffCallback, treeResults](
+                               const StatsFetchContext& diffFetchContext) {
+                  ctx->getStatsContext().merge(diffFetchContext);
+                  return treeResults;
+                })
+                .semi()
+                .via(&folly::QueuedImmediateExecutor::instance());
+          })
       .thenValue([this, rootInode, ctx, checkoutTimes, stopWatch, snapshotHash](
-                     std::tuple<shared_ptr<const Tree>, shared_ptr<const Tree>>
-                         treeResults) {
+                     std::tuple<
+                         ObjectStore::GetRootTreeResult,
+                         ObjectStore::GetRootTreeResult> treeResults) {
         checkoutTimes->didDiff = stopWatch.elapsed();
 
         // Perform the requested checkout operation after the journal diff
@@ -1459,7 +1486,7 @@ folly::Future<CheckoutResult> EdenMount::checkout(
             std::move(renameLock),
             parentState_.wlock(),
             snapshotHash,
-            std::get<1>(treeResults));
+            std::get<1>(treeResults).tree);
 
         checkoutTimes->didAcquireRenameLock = stopWatch.elapsed();
 
@@ -1493,7 +1520,7 @@ folly::Future<CheckoutResult> EdenMount::checkout(
             .thenValue([ctx, treeResults = std::move(treeResults), rootInode](
                            auto&&) mutable {
               auto& [fromTree, toTree] = treeResults;
-              return rootInode->checkout(ctx.get(), fromTree, toTree);
+              return rootInode->checkout(ctx.get(), fromTree.tree, toTree.tree);
             });
       })
       .thenValue([ctx, checkoutTimes, stopWatch, snapshotHash](auto&&) {
@@ -1502,17 +1529,20 @@ folly::Future<CheckoutResult> EdenMount::checkout(
         // Complete the checkout
         return ctx->finish(snapshotHash);
       })
-      .ensure([this, ctx, resumingCheckout]() {
+      .ensure([this, ctx, oldState]() {
         // Checkout completed, make sure to always reset the checkoutInProgress
         // flag!
         auto parentLock = parentState_.wlock();
-        XCHECK(parentLock->checkoutInProgress);
+        XCHECK(std::holds_alternative<ParentCommitState::CheckoutInProgress>(
+            parentLock->checkoutState));
         if (ctx->isDryRun()) {
-          // After a dryrun, set checkoutInProgress back to the value it was
-          // previously.
-          parentLock->checkoutInProgress = resumingCheckout;
+          // In the case where a past checkout was interrupted, we need to make
+          // sure that future checkout operations will properly attempt to
+          // resume it, thus restore the checkoutState to what it was prior to
+          // the DRY_RUN checkout.
+          parentLock->checkoutState = oldState;
         } else {
-          parentLock->checkoutInProgress = false;
+          parentLock->checkoutState = ParentCommitState::NoOngoingCheckout{};
         }
       })
       .thenValue(
@@ -1709,6 +1739,7 @@ std::unique_ptr<DiffContext> EdenMount::createDiffContext(
       cancellation,
       listIgnored,
       getCheckoutConfig()->getCaseSensitive(),
+      getCheckoutConfig()->getEnableWindowsSymlinks(),
       getObjectStore(),
       serverState_->getTopLevelIgnores());
 }
@@ -1718,16 +1749,16 @@ ImmediateFuture<Unit> EdenMount::diff(
     DiffContext* ctxPtr,
     const RootId& commitHash) const {
   return objectStore_->getRootTree(commitHash, ctxPtr->getFetchContext())
-      .thenValue([this](std::shared_ptr<const Tree> rootTree) {
+      .thenValue([this](ObjectStore::GetRootTreeResult rootTree) {
         return waitForPendingWrites().thenValue(
             [rootTree = std::move(rootTree)](auto&&) { return rootTree; });
       })
       .thenValue([ctxPtr, rootInode = std::move(rootInode)](
-                     std::shared_ptr<const Tree>&& rootTree) {
+                     ObjectStore::GetRootTreeResult rootTree) {
         return rootInode->diff(
             ctxPtr,
             RelativePathPiece{},
-            std::vector{std::move(rootTree)},
+            std::vector{std::move(rootTree.tree)},
             ctxPtr->getToplevelIgnore(),
             false);
       });
@@ -1743,24 +1774,19 @@ ImmediateFuture<Unit> EdenMount::diff(
   if (enforceCurrentParent) {
     auto parentInfo = parentState_.rlock();
 
-    if (parentInfo->checkoutInProgress) {
-      if (parentInfo->checkoutPid == folly::get_cached_pid() ||
-          !parentInfo->checkoutOriginalTrees) {
-        return makeImmediateFuture<Unit>(newEdenError(
-            EdenErrorType::CHECKOUT_IN_PROGRESS,
-            "cannot compute status while a checkout is currently in progress"));
-      } else if (getEdenConfig()->allowResumeCheckout.getValue()) {
-        auto [fromCommit, toCommit] = *parentInfo->checkoutOriginalTrees;
-        return makeImmediateFuture<Unit>(newEdenError(
-            EdenErrorType::CHECKOUT_IN_PROGRESS,
-            fmt::format(
-                "cannot compute status while a checkout is in progress - please run 'hg update --clean {}' to resume it",
-                toCommit)));
-      } else {
-        return makeImmediateFuture<Unit>(newEdenError(
-            EdenErrorType::CHECKOUT_IN_PROGRESS,
-            "cannot compute status for an interrupted checkout operation"));
-      }
+    if (std::holds_alternative<ParentCommitState::CheckoutInProgress>(
+            parentInfo->checkoutState)) {
+      return makeImmediateFuture<Unit>(newEdenError(
+          EdenErrorType::CHECKOUT_IN_PROGRESS,
+          "cannot compute status while a checkout is currently in progress"));
+    } else if (
+        auto* interrupted = std::get_if<ParentCommitState::InterruptedCheckout>(
+            &parentInfo->checkoutState)) {
+      return makeImmediateFuture<Unit>(newEdenError(
+          EdenErrorType::CHECKOUT_IN_PROGRESS,
+          fmt::format(
+              "cannot compute status while a checkout is in progress - please run 'hg update --clean {}' to resume it",
+              interrupted->toCommit)));
     }
 
     if (parentInfo->workingCopyParentRootId != commitHash) {
@@ -1818,7 +1844,7 @@ void EdenMount::resetParent(const RootId& parent) {
   // Hold the snapshot lock around the entire operation.
   auto parentLock = parentState_.wlock();
 
-  if (parentLock->checkoutInProgress) {
+  if (parentLock->isCheckoutInProgressOrInterrupted()) {
     throw newEdenError(
         EdenErrorType::CHECKOUT_IN_PROGRESS,
         "cannot reset parent while a checkout is currently in progress");
@@ -1848,7 +1874,7 @@ void EdenMount::setLastCheckoutTime(EdenTimestamp time) {
 
 bool EdenMount::isCheckoutInProgress() {
   auto parentLock = parentState_.rlock();
-  return parentLock->checkoutInProgress;
+  return parentLock->isCheckoutInProgressOrInterrupted();
 }
 
 RenameLock EdenMount::acquireRenameLock() {
@@ -1898,6 +1924,7 @@ std::unique_ptr<FuseChannel, FsChannelDeleter> makeFuseChannel(
     folly::File fuseFd) {
   auto edenConfig = mount->getEdenConfig();
   return makeFuseChannel(
+      mount->getServerState()->getPrivHelper(),
       std::move(fuseFd),
       mount->getPath(),
       FLAGS_fuseNumThreads,

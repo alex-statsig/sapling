@@ -58,7 +58,9 @@ ack-match-full-traversal=True
 contentstorefallback=True
 
 [experimental]
+rustmatcher=True
 use-rust-changelog=True
+windows-symlinks=True
 """
     if use_watchman:
         content += """

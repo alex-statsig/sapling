@@ -54,7 +54,7 @@ def escape(s, quote=None):
     return s
 
 
-class passwordmgr(object):
+class passwordmgr:
     def __init__(self, ui, passwddb):
         self.ui = ui
         self.passwddb = passwddb
@@ -176,7 +176,7 @@ def _gen_sendfile(orgsend):
     return _sendfile
 
 
-has_https = util.safehasattr(urlreq, "httpshandler")
+has_https = hasattr(urlreq, "httpshandler")
 
 
 class httpconnection(keepalive.HTTPConnection):

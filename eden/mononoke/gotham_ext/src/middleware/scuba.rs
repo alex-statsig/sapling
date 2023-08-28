@@ -21,6 +21,7 @@ use hyper::Method;
 use hyper::Response;
 use hyper::StatusCode;
 use hyper::Uri;
+use scopeguard::ScopeGuard;
 use scuba_ext::MononokeScubaSampleBuilder;
 use scuba_ext::ScubaValue;
 use time_ext::DurationExt;
@@ -181,11 +182,7 @@ where
     None
 }
 
-fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Option<()> {
-    let mut scuba = state.try_take::<ScubaMiddlewareState>()?.0;
-
-    scuba.add(HttpScubaKey::HttpStatus, status_code.as_u16());
-
+fn populate_scuba(scuba: &mut MononokeScubaSampleBuilder, state: &mut State) {
     if let Some(uri) = Uri::try_borrow_from(state) {
         scuba.add(HttpScubaKey::HttpPath, uri.path());
         if let Some(query) = uri.query() {
@@ -199,7 +196,7 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
 
     if let Some(headers) = HeaderMap::try_borrow_from(state) {
         add_header(
-            &mut scuba,
+            scuba,
             headers,
             HttpScubaKey::HttpHost,
             header::HOST,
@@ -207,7 +204,7 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
         );
 
         add_header(
-            &mut scuba,
+            scuba,
             headers,
             HttpScubaKey::RequestContentLength,
             header::CONTENT_LENGTH,
@@ -215,7 +212,7 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
         );
 
         add_header(
-            &mut scuba,
+            scuba,
             headers,
             HttpScubaKey::HttpUserAgent,
             header::USER_AGENT,
@@ -223,7 +220,7 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
         );
 
         add_header(
-            &mut scuba,
+            scuba,
             headers,
             HttpScubaKey::ClientCorrelator,
             CLIENT_CORRELATOR,
@@ -248,6 +245,14 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
     }
 
     scuba.add(HttpScubaKey::RequestId, state.short_request_id());
+}
+
+fn log_stats<H: ScubaHandler>(
+    mut scuba: MononokeScubaSampleBuilder,
+    state: &mut State,
+    status_code: &StatusCode,
+) -> Option<()> {
+    scuba.add(HttpScubaKey::HttpStatus, status_code.as_u16());
 
     if let Some(HeadersDuration(duration)) = HeadersDuration::try_borrow_from(state) {
         scuba.add(
@@ -304,8 +309,15 @@ fn log_stats<H: ScubaHandler>(state: &mut State, status_code: &StatusCode) -> Op
     Some(())
 }
 
+fn log_cancelled(mut scuba: MononokeScubaSampleBuilder) {
+    scuba.add("log_tag", "EdenAPI Request Cancelled");
+    scuba.log();
+}
+
 #[derive(StateData)]
-pub struct ScubaMiddlewareState(MononokeScubaSampleBuilder);
+pub struct ScubaMiddlewareState(
+    ScopeGuard<MononokeScubaSampleBuilder, Box<dyn FnOnce(MononokeScubaSampleBuilder) + Send>>,
+);
 
 impl ScubaMiddlewareState {
     pub fn add<K, V>(&mut self, key: K, value: V) -> &mut Self
@@ -358,17 +370,35 @@ impl ScubaMiddlewareState {
 impl<H: ScubaHandler> Middleware for ScubaMiddleware<H> {
     async fn inbound(&self, state: &mut State) -> Option<Response<Body>> {
         // Reset the scuba sequence counter for each request.
-        state.put(ScubaMiddlewareState(self.scuba.clone().with_seq("seq")));
+        let mut scuba = self.scuba.clone().with_seq("seq");
+
+        // Populate the sample builder with values available at the start of the request.
+        populate_scuba(&mut scuba, state);
+
+        // Ensure we log if the request is cancelled.
+        let scuba = scopeguard::guard(
+            scuba,
+            Box::new(|scuba| {
+                log_cancelled(scuba);
+            }) as Box<dyn FnOnce(MononokeScubaSampleBuilder) + Send>,
+        );
+
+        state.put(ScubaMiddlewareState(scuba));
         None
     }
 
     async fn outbound(&self, state: &mut State, response: &mut Response<Body>) {
-        if let Some(uri) = Uri::try_borrow_from(state) {
-            if uri.path() == "/health_check" {
-                return;
-            }
-        }
+        if let Some(scuba_middleware) = state.try_take::<ScubaMiddlewareState>() {
+            // Defuse the scopeguard so that we will no longer log cancellation.
+            let scuba = ScopeGuard::into_inner(scuba_middleware.0);
 
-        log_stats::<H>(state, &response.status());
+            if let Some(uri) = Uri::try_borrow_from(state) {
+                if uri.path() == "/health_check" {
+                    return;
+                }
+            }
+
+            log_stats::<H>(scuba, state, &response.status());
+        }
     }
 }

@@ -1,4 +1,3 @@
-#chg-compatible
 #debugruntest-compatible
 
   $ eagerepo
@@ -289,7 +288,7 @@ Ensure --continue restores a correct state (issue3046) and phase:
   continue: hg rebase --continue
   $ hg rebase -c
   rebasing 17b4880d2402 "B2"
-  note: rebase of 17b4880d2402 created no changes to commit
+  note: not rebasing 17b4880d2402, its destination (rebasing onto) commit already has all its changes
   $ hg  log -G --template "{phase} '{desc}' {branches}\n"
   o  draft 'C'
   │

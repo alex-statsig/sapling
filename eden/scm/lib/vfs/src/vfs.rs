@@ -226,12 +226,19 @@ impl VFS {
     /// Add a symlink `link_name` pointing to `link_dest`. On platforms that do not support symlinks,
     /// `link_name` will be a file containing the path to `link_dest`.
     fn symlink(&self, link_name: &Path, link_dest: &Path) -> Result<()> {
-        #[cfg(windows)]
-        let result = Self::plain_symlink_file(link_name, link_dest);
-
-        #[cfg(not(windows))]
-        let result = if self.inner.supports_symlinks {
-            std::os::unix::fs::symlink(link_dest, link_name).map_err(Into::into)
+        let result = if self.inner.supports_symlinks && (cfg!(unix) || cfg!(windows)) {
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(
+                    util::path::replace_slash_with_backslash(link_dest).as_path(),
+                    link_name,
+                )
+                .map_err(Into::into)
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(link_dest, link_name).map_err(Into::into)
+            }
         } else {
             Self::plain_symlink_file(link_name, link_dest)
         };
@@ -319,17 +326,29 @@ impl VFS {
 
     // Reads file content
     pub fn read(&self, path: &RepoPath) -> Result<Bytes> {
+        Ok(self.read_with_metadata(path)?.0)
+    }
+
+    // Reads file content and metadata
+    pub fn read_with_metadata(&self, path: &RepoPath) -> Result<(Bytes, Metadata)> {
         let filepath = self.inner.auditor.audit(path)?;
         let metadata = self.metadata(path)?;
         let content = if metadata.is_symlink() {
             match std::fs::read_link(&filepath)?.to_str() {
-                Some(p) => p.as_bytes().iter().map(|u| *u).collect(),
+                Some(p) => {
+                    let p = if cfg!(windows) {
+                        p.replace('\\', "/")
+                    } else {
+                        p.to_owned()
+                    };
+                    p.as_bytes().to_vec()
+                }
                 None => bail!("invalid path during vfs::read '{:?}'", filepath),
             }
         } else {
             std::fs::read(filepath)?
         };
-        Ok(content.into())
+        Ok((content.into(), metadata))
     }
 
     /// Removes file, but unlike Self::remove, does not delete empty directories.

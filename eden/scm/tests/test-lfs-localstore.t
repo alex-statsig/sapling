@@ -2,7 +2,6 @@
 
 Test the lfs.localstore config option
 
-  $ setconfig workingcopy.ruststatus=False
   $ enable lfs
   $ setconfig lfs.url=file://$TESTTMP/remote lfs.threshold=1
 
@@ -17,9 +16,9 @@ Both commits create LFS files (flag=2000)
 
   $ hg debugfilerevision -r 'all()'
   31b5f55a8b18: C1
-   C1: bin=0 lnk=0 flag=2000 size=2 copied='' chain=c1f06831b8f9
+   C1: bin=0 lnk=0 flag=2000 size=2 copied=''
   a6f371762961: C2
-   C2: bin=0 lnk=0 flag=2000 size=2 copied='' chain=cee8fd3a5958
+   C2: bin=0 lnk=0 flag=2000 size=2 copied=''
 
 Upload them to remote store
 

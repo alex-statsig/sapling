@@ -15,8 +15,8 @@ use manifest_tree::TreeManifest;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use pathmatcher::DifferenceMatcher;
+use pathmatcher::DynMatcher;
 use pathmatcher::ExactMatcher;
-use pathmatcher::Matcher;
 use status::StatusBuilder;
 use tracing::trace;
 use treestate::filestate::StateFlags;
@@ -24,7 +24,7 @@ use treestate::treestate::TreeState;
 use types::HgId;
 use types::RepoPathBuf;
 
-use crate::filesystem::ChangeType;
+use crate::filesystem::PendingChange;
 use crate::util::walk_treestate;
 use crate::walker::WalkError;
 
@@ -44,14 +44,15 @@ impl ReadTreeManifest for FakeTreeResolver {
 pub fn compute_status(
     p1_manifest: &impl Manifest,
     treestate: Arc<Mutex<TreeState>>,
-    pending_changes: impl Iterator<Item = Result<ChangeType>>,
-    matcher: Arc<dyn Matcher + Send + Sync + 'static>,
+    pending_changes: impl Iterator<Item = Result<PendingChange>>,
+    matcher: DynMatcher,
 ) -> Result<StatusBuilder> {
     let mut modified = vec![];
     let mut added = vec![];
     let mut removed = vec![];
     let mut deleted = vec![];
     let mut unknown = vec![];
+    let mut ignored = vec![];
     let mut invalid_path = vec![];
     let mut invalid_type = vec![];
 
@@ -64,8 +65,12 @@ pub fn compute_status(
     let mut manifest_files = HashMap::<RepoPathBuf, (bool, bool)>::new();
     for change in pending_changes {
         let (path, is_deleted) = match change {
-            Ok(ChangeType::Changed(path)) => (path, false),
-            Ok(ChangeType::Deleted(path)) => (path, true),
+            Ok(PendingChange::Changed(path)) => (path, false),
+            Ok(PendingChange::Deleted(path)) => (path, true),
+            Ok(PendingChange::Ignored(path)) => {
+                ignored.push(path);
+                continue;
+            }
             Err(e) => {
                 let e = match e.downcast::<types::path::ParseError>() {
                     Ok(parse_err) => {
@@ -103,7 +108,12 @@ pub fn compute_status(
         };
 
         let mut treestate = treestate.lock();
-        match treestate.normalized_get(&path)? {
+
+        // Don't use normalized_get since we need to support statuses like:
+        //   $ sl status
+        //   R foo
+        //   ? FOO
+        match treestate.get(&path)? {
             Some(state) => {
                 let exist_parent = state
                     .state
@@ -122,11 +132,8 @@ pub fn compute_status(
                     // renamed over another existing file.
                     (false, false, false, true) => modified.push(path),
                     (false, false, false, false) => unknown.push(path),
-                    _ => {
-                        // The remaining case is (T, F, _, _).
-                        // If the file is deleted, but didn't exist in a parent commit,
-                        // it didn't change.
-                    }
+                    (true, false, true, _) => deleted.push(path),
+                    (true, false, false, _) => {}
                 }
             }
             None => {
@@ -175,7 +182,8 @@ pub fn compute_status(
         .chain(added.iter())
         .chain(removed.iter())
         .chain(deleted.iter())
-        .chain(unknown.iter());
+        .chain(unknown.iter())
+        .chain(ignored.iter());
 
     // Augment matcher to skip "seen" files since they have already been handled above.
     let matcher = Arc::new(DifferenceMatcher::new(
@@ -251,7 +259,7 @@ pub fn compute_status(
     walk_treestate(
         &mut treestate,
         matcher.clone(),
-        StateFlags::COPIED,
+        StateFlags::COPIED | StateFlags::EXIST_NEXT,
         StateFlags::empty(),
         |path, state| {
             trace!(%path, "modified (marked copy, not in pending changes)");
@@ -261,6 +269,12 @@ pub fn compute_status(
     )?;
 
     Ok(StatusBuilder::new()
+        // Ignored added files can show up as both ignored and added.
+        // Work around by inserting ignored first so added files
+        // "win". The better fix is to augment the ignore matcher to
+        // not include added files, which almost works except for
+        // EdenFS, which doesn't report added ignored files as added.
+        .ignored(ignored)
         .modified(modified)
         .added(added)
         .removed(removed)
@@ -272,6 +286,7 @@ pub fn compute_status(
 
 #[cfg(test)]
 mod tests {
+    use pathmatcher::Matcher;
     use status::FileStatus;
     use status::Status;
     use tempdir::TempDir;
@@ -389,9 +404,9 @@ mod tests {
         let changes = changes.iter().map(|&(path, is_deleted)| {
             let path = RepoPathBuf::from_string(path.to_string()).expect("path");
             if is_deleted {
-                Ok(ChangeType::Deleted(path))
+                Ok(PendingChange::Deleted(path))
             } else {
-                Ok(ChangeType::Changed(path))
+                Ok(PendingChange::Changed(path))
             }
         });
 

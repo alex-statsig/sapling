@@ -12,6 +12,8 @@
 #include <string>
 #include <unordered_map>
 
+#include "eden/common/os/ProcessId.h"
+
 namespace facebook::eden {
 
 class DynamicEvent {
@@ -92,12 +94,12 @@ struct FetchHeavy {
   static constexpr const char* type = "fetch_heavy";
 
   std::string client_cmdline;
-  pid_t pid;
+  ProcessId pid;
   uint64_t fetch_count;
 
   void populate(DynamicEvent& event) const {
     event.addString("client_cmdline", client_cmdline);
-    event.addInt("client_pid", pid);
+    event.addInt("client_pid", pid.get());
     event.addInt("fetch_count", fetch_count);
   }
 };
@@ -180,6 +182,7 @@ struct FinishedMount {
   double duration = 0.0;
   bool success = false;
   bool clean = false;
+  int64_t inode_catalog_type = -1;
 
   void populate(DynamicEvent& event) const {
     event.addString("repo_type", repo_type);
@@ -189,6 +192,7 @@ struct FinishedMount {
     event.addDouble("duration", duration);
     event.addBool("success", success);
     event.addBool("clean", clean);
+    event.addInt("overlay_type", inode_catalog_type);
   }
 };
 
@@ -246,7 +250,7 @@ struct ServerDataFetch {
   static constexpr const char* type = "server_data_fetch";
 
   std::string cause;
-  std::optional<pid_t> client_pid;
+  OptionalProcessId client_pid;
   std::optional<std::string> client_cmdline;
   std::string fetched_path;
   std::string fetched_object_type;
@@ -254,7 +258,7 @@ struct ServerDataFetch {
   void populate(DynamicEvent& event) const {
     event.addString("interface", cause);
     if (client_pid) {
-      event.addInt("client_pid", client_pid.value());
+      event.addInt("client_pid", client_pid.value().get());
     }
     if (client_cmdline) {
       event.addString("client_cmdline", client_cmdline.value());
@@ -274,8 +278,6 @@ struct EdenApiMiss {
 
   std::string repo_name;
   MissType miss_type;
-  std::string path;
-  std::string hash;
 
   void populate(DynamicEvent& event) const {
     event.addString("repo_source", repo_name);
@@ -284,8 +286,6 @@ struct EdenApiMiss {
     } else {
       event.addString("edenapi_miss_type", "tree");
     }
-    event.addString("path", path);
-    event.addString("hash", hash);
   }
 };
 
@@ -316,6 +316,28 @@ struct MetadataSizeMismatch {
   void populate(DynamicEvent& event) const {
     event.addString("mount_protocol", mount_protocol);
     event.addString("method", method);
+  }
+};
+
+struct InodeMetadataMismatch {
+  uint64_t mode;
+  uint64_t ino;
+  uint64_t gid;
+  uint64_t uid;
+  uint64_t atime;
+  uint64_t ctime;
+  uint64_t mtime;
+
+  static constexpr const char* type = "inode_metadata_mismatch";
+
+  void populate(DynamicEvent& event) const {
+    event.addInt("st_mode", mode);
+    event.addInt("ino", ino);
+    event.addInt("gid", gid);
+    event.addInt("uid", uid);
+    event.addInt("atime", atime);
+    event.addInt("ctime", ctime);
+    event.addInt("mtime", mtime);
   }
 };
 

@@ -5,7 +5,7 @@
  * GNU General Public License version 2.
  */
 
-#include "TestMount.h"
+#include "eden/fs/testharness/TestMount.h"
 
 #include <folly/FileUtil.h>
 #include <folly/executors/ManualExecutor.h>
@@ -23,6 +23,7 @@
 #include "eden/fs/inodes/EdenDispatcherFactory.h"
 #include "eden/fs/inodes/FileInode.h"
 #include "eden/fs/inodes/InodeMap.h"
+#include "eden/fs/inodes/InodeTable.h"
 #include "eden/fs/inodes/Overlay.h"
 #include "eden/fs/inodes/TreeInode.h"
 #include "eden/fs/journal/Journal.h"
@@ -41,22 +42,16 @@
 #include "eden/fs/telemetry/NullStructuredLogger.h"
 #include "eden/fs/testharness/FakeBackingStore.h"
 #include "eden/fs/testharness/FakeClock.h"
+#include "eden/fs/testharness/FakeFuse.h"
 #include "eden/fs/testharness/FakePrivHelper.h"
 #include "eden/fs/testharness/FakeTreeBuilder.h"
 #include "eden/fs/testharness/TempFile.h"
 #include "eden/fs/testharness/TestUtil.h"
 #include "eden/fs/utils/FileUtils.h"
+#include "eden/fs/utils/Guid.h"
 #include "eden/fs/utils/NotImplemented.h"
 #include "eden/fs/utils/UnboundedQueueExecutor.h"
 #include "eden/fs/utils/UserInfo.h"
-
-#ifdef _WIN32
-#include "eden/fs/utils/Guid.h"
-#else
-#include "eden/common/utils/ProcessNameCache.h"
-#include "eden/fs/inodes/InodeTable.h"
-#include "eden/fs/testharness/FakeFuse.h"
-#endif
 
 using folly::Future;
 using folly::makeFuture;
@@ -273,9 +268,14 @@ void TestMount::initialize(
     const RootId& initialCommitHash,
     FakeTreeBuilder& rootBuilder,
     bool startReady,
-    Overlay::InodeCatalogType inodeCatalogType) {
+    InodeCatalogType inodeCatalogType,
+    InodeCatalogOptions inodeCatalogOptions) {
   createMountWithoutInitializing(
-      initialCommitHash, rootBuilder, startReady, inodeCatalogType);
+      initialCommitHash,
+      rootBuilder,
+      startReady,
+      inodeCatalogType,
+      inodeCatalogOptions);
   initializeEdenMount();
 }
 
@@ -288,7 +288,8 @@ void TestMount::createMountWithoutInitializing(
     const RootId& initialCommitHash,
     FakeTreeBuilder& rootBuilder,
     bool startReady,
-    Overlay::InodeCatalogType inodeCatalogType) {
+    InodeCatalogType inodeCatalogType,
+    InodeCatalogOptions inodeCatalogOptions) {
   // Finalize rootBuilder and get the root Tree
   rootBuilder.finalize(backingStore_, startReady);
   auto rootTree = rootBuilder.getRoot();
@@ -300,10 +301,12 @@ void TestMount::createMountWithoutInitializing(
   setInitialCommit(initialCommitHash, rootTree->get().getHash());
 
   // Create edenMount_
-  createMount(inodeCatalogType);
+  createMount(inodeCatalogType, inodeCatalogOptions);
 }
 
-void TestMount::createMount(Overlay::InodeCatalogType inodeCatalogType) {
+void TestMount::createMount(
+    InodeCatalogType inodeCatalogType,
+    InodeCatalogOptions inodeCatalogOptions) {
   shared_ptr<ObjectStore> objectStore = ObjectStore::create(
       backingStore_,
       treeCache_,
@@ -311,6 +314,7 @@ void TestMount::createMount(Overlay::InodeCatalogType inodeCatalogType) {
       std::make_shared<ProcessNameCache>(),
       std::make_shared<NullStructuredLogger>(),
       edenConfig_,
+      config_->getEnableWindowsSymlinks(),
       config_->getCaseSensitive());
   auto journal = std::make_unique<Journal>(stats_.copy());
   edenMount_ = EdenMount::create(
@@ -320,7 +324,8 @@ void TestMount::createMount(Overlay::InodeCatalogType inodeCatalogType) {
       serverState_,
       std::move(journal),
       stats_.copy(),
-      inodeCatalogType);
+      inodeCatalogType,
+      inodeCatalogOptions);
 #ifndef _WIN32
   dispatcher_ = EdenDispatcherFactory::makeFuseDispatcher(edenMount_.get());
 #endif
@@ -343,9 +348,14 @@ void TestMount::initialize(FakeTreeBuilder& rootBuilder, bool startReady) {
 
 void TestMount::initialize(
     FakeTreeBuilder& rootBuilder,
-    Overlay::InodeCatalogType inodeCatalogType) {
+    InodeCatalogType inodeCatalogType,
+    InodeCatalogOptions inodeCatalogOptions) {
   initialize(
-      nextCommitHash(), rootBuilder, /* startReady */ true, inodeCatalogType);
+      nextCommitHash(),
+      rootBuilder,
+      /* startReady */ true,
+      inodeCatalogType,
+      inodeCatalogOptions);
 }
 
 void TestMount::createMountWithoutInitializing(
@@ -438,6 +448,7 @@ void TestMount::remount() {
       std::make_shared<ProcessNameCache>(),
       std::make_shared<NullStructuredLogger>(),
       edenConfig_,
+      config->getEnableWindowsSymlinks(),
       config->getCaseSensitive());
 
   auto journal = std::make_unique<Journal>(stats_.copy());
@@ -461,7 +472,9 @@ void TestMount::remount() {
       blobCache_,
       serverState_,
       std::move(journal),
-      stats_.copy());
+      stats_.copy(),
+      kDefaultInodeCatalogType,
+      kDefaultInodeCatalogOptions);
   initializeEdenMount();
 }
 
@@ -477,6 +490,7 @@ void TestMount::remountGracefully() {
       std::make_shared<ProcessNameCache>(),
       std::make_shared<NullStructuredLogger>(),
       edenConfig_,
+      config->getEnableWindowsSymlinks(),
       config->getCaseSensitive());
 
   auto journal = std::make_unique<Journal>(stats_.copy());
@@ -508,7 +522,9 @@ void TestMount::remountGracefully() {
       blobCache_,
       serverState_,
       std::move(journal),
-      stats_.copy());
+      stats_.copy(),
+      kDefaultInodeCatalogType,
+      kDefaultInodeCatalogOptions);
   edenMount_
       ->initialize(
           [](auto) {},
@@ -633,7 +649,7 @@ FileInodePtr TestMount::overwriteFile(
   desired.size = 0;
   (void)file->setattr(desired, ObjectFetchContext::getNullContext()).get(0ms);
 
-  off_t offset = 0;
+  FileOffset offset = 0;
   file->write(contents, offset, ObjectFetchContext::getNullContext()).get(0ms);
   file->fsync(/*datasync*/ true);
 #endif

@@ -119,20 +119,20 @@ def _flattenresponse(response: Sized, sort: bool = False):
     if (
         isinstance(response, tuple)
         and len(response) == 2
-        and util.safehasattr(response[1], "wait")
+        and hasattr(response[1], "wait")
     ):
         response = list(response[0])
     # Resolve async stream into list(stream).
     elif (
         not isinstance(response, list)
-        and util.safehasattr(response, "__iter__")
-        and util.safehasattr(response, "typename")
+        and hasattr(response, "__iter__")
+        and hasattr(response, "typename")
     ):
         # pyre-fixme[6]: For 1st param expected `Iterable[Variable[_T]]` but got
         #  `Union[tuple[typing.Any], Sized]`.
         response = list(response)
     # Resolve PyCell (opaque data) to PyObject.
-    elif util.safehasattr(response, "export"):
+    elif hasattr(response, "export"):
         # pyre-fixme[16]: Item `List` of `Union[List[typing.Any], tuple[typing.Any],
         #  Sized]` has no attribute `export`.
         response = response.export()
@@ -924,171 +924,6 @@ def debugdate(ui, date, **opts) -> None:
 
 
 @command(
-    "debugdeltachain",
-    cmdutil.debugrevlogopts + cmdutil.formatteropts,
-    _("-c|-m|FILE"),
-    optionalrepo=True,
-)
-def debugdeltachain(ui, repo, file_=None, **opts) -> None:
-    """dump information about delta chains in a revlog
-
-    Output can be templatized. Available template keywords are:
-
-    :``rev``:       revision number
-    :``chainid``:   delta chain identifier (numbered by unique base)
-    :``chainlen``:  delta chain length to this revision
-    :``prevrev``:   previous revision in delta chain
-    :``deltatype``: role of delta / how it was computed
-    :``compsize``:  compressed size of revision
-    :``uncompsize``: uncompressed size of revision
-    :``chainsize``: total size of compressed revisions in chain
-    :``chainratio``: total chain size divided by uncompressed revision size
-                    (new delta chains typically start at ratio 2.00)
-    :``lindist``:   linear distance from base revision in delta chain to end
-                    of this revision
-    :``extradist``: total size of revisions not part of this delta chain from
-                    base of delta chain to end of this revision; a measurement
-                    of how much extra data we need to read/seek across to read
-                    the delta chain for this revision
-    :``extraratio``: extradist divided by chainsize; another representation of
-                    how much unrelated data is needed to load this delta chain
-
-    If the repository is configured to use the sparse read, additional keywords
-    are available:
-
-    :``readsize``:     total size of data read from the disk for a revision
-                       (sum of the sizes of all the blocks)
-    :``largestblock``: size of the largest block of data read from the disk
-    :``readdensity``:  density of useful bytes in the data read from the disk
-
-    The sparse read can be enabled with experimental.sparse-read = True
-    """
-    r = cmdutil.openrevlog(repo, "debugdeltachain", file_, opts)
-    index = r.index
-    generaldelta = r.version & revlog.FLAG_GENERALDELTA
-    withsparseread = getattr(r, "_withsparseread", False)
-
-    def revinfo(rev):
-        e = index[rev]
-        compsize = e[1]
-        uncompsize = e[2]
-        chainsize = 0
-
-        if generaldelta:
-            if e[3] == e[5]:
-                deltatype = "p1"
-            elif e[3] == e[6]:
-                deltatype = "p2"
-            elif e[3] == rev - 1:
-                deltatype = "prev"
-            elif e[3] == rev:
-                deltatype = "base"
-            else:
-                deltatype = "other"
-        else:
-            if e[3] == rev:
-                deltatype = "base"
-            else:
-                deltatype = "prev"
-
-        chain = r._deltachain(rev)[0]
-        for iterrev in chain:
-            e = index[iterrev]
-            chainsize += e[1]
-
-        return compsize, uncompsize, deltatype, chain, chainsize
-
-    fm = ui.formatter("debugdeltachain", opts)
-
-    fm.plain(
-        "    rev  chain# chainlen     prev   delta       "
-        "size    rawsize  chainsize     ratio   lindist extradist "
-        "extraratio"
-    )
-    if withsparseread:
-        fm.plain("   readsize largestblk rddensity")
-    fm.plain("\n")
-
-    chainbases = {}
-    for rev in r:
-        comp, uncomp, deltatype, chain, chainsize = revinfo(rev)
-        chainbase = chain[0]
-        chainid = chainbases.setdefault(chainbase, len(chainbases) + 1)
-        start = r.start
-        length = r.length
-        basestart = start(chainbase)
-        revstart = start(rev)
-        lineardist = revstart + comp - basestart
-        extradist = lineardist - chainsize
-        try:
-            prevrev = chain[-2]
-        except IndexError:
-            prevrev = -1
-
-        chainratio = float(chainsize) / float(uncomp)
-        extraratio = float(extradist) / float(chainsize)
-
-        fm.startitem()
-        fm.write(
-            "rev chainid chainlen prevrev deltatype compsize "
-            "uncompsize chainsize chainratio lindist extradist "
-            "extraratio",
-            "%7d %7d %8d %8d %7s %10d %10d %10d %9.5f %9d %9d %10.5f",
-            rev,
-            chainid,
-            len(chain),
-            prevrev,
-            deltatype,
-            comp,
-            uncomp,
-            chainsize,
-            chainratio,
-            lineardist,
-            extradist,
-            extraratio,
-            rev=rev,
-            chainid=chainid,
-            chainlen=len(chain),
-            prevrev=prevrev,
-            deltatype=deltatype,
-            compsize=comp,
-            uncompsize=uncomp,
-            chainsize=chainsize,
-            chainratio=chainratio,
-            lindist=lineardist,
-            extradist=extradist,
-            extraratio=extraratio,
-        )
-        if withsparseread:
-            readsize = 0
-            largestblock = 0
-            for revschunk in revlog._slicechunk(r, chain):
-                blkend = start(revschunk[-1]) + length(revschunk[-1])
-                blksize = blkend - start(revschunk[0])
-
-                readsize += blksize
-                if largestblock < blksize:
-                    largestblock = blksize
-
-            readdensity = float(chainsize) / float(readsize)
-
-            fm.write(
-                "readsize largestblock readdensity",
-                " %10d %10d %9.5f",
-                readsize,
-                largestblock,
-                readdensity,
-                readsize=readsize,
-                largestblock=largestblock,
-                readdensity=readdensity,
-            )
-
-        fm.plain("\n")
-
-    fm.end()
-
-
-@command(
     "debugdirstate|debugstate",
     [
         ("", "nodates", None, _("do not display the saved mtime")),
@@ -1542,13 +1377,6 @@ def debugfilerevision(ui, repo, *pats, **opts) -> None:
     If '--verbose' is set, also print raw content.
     """
 
-    def deltachainshortnodes(flog, fctx):
-        chain = flog._deltachain(fctx.filerev())[0]
-        # chain could be using revs or nodes, convert to short nodes
-        if chain and isinstance(chain[0], int):
-            chain = [flog.node(x) for x in chain]
-        return [short(x) for x in chain]
-
     for rev in scmutil.revrange(repo, opts.get("rev") or ["."]):
         ctx = repo[rev]
         ui.write(_x("%s: %s\n") % (short(ctx.node()), ctx.description().split("\n")[0]))
@@ -1566,7 +1394,6 @@ def debugfilerevision(ui, repo, *pats, **opts) -> None:
                 ("flag", lambda: "%x" % fctx.rawflags()),
                 ("size", lambda: "%d" % fctx.size()),
                 ("copied", lambda: "%r" % (fctx.renamed() or ("",))[0]),
-                ("chain", lambda: ",".join(deltachainshortnodes(flog, fctx))),
             ]
             msg = " %s:" % fctx.path()
             for name, func in fields:
@@ -1743,17 +1570,13 @@ def debugindex(ui, repo, file_=None, **opts) -> None:
 
     if format == 0:
         ui.write(
-            ("   rev    offset  length " + basehdr + " linkrev" " %s %s p2\n")
-            % ("nodeid".ljust(idlen), "p1".ljust(idlen))
+            ("% 6s % 7s %s %s %s\n")
+            % ("rev", "linkrev", "nodeid".ljust(idlen), "p1".ljust(idlen), "p2")
         )
     elif format == 1:
         ui.write(
-            (
-                "   rev flag   offset   length"
-                "     size " + basehdr + "   link     p1     p2"
-                " %s\n"
-            )
-            % "nodeid".rjust(idlen)
+            ("% 6s %4s % 6s % 6s % 6s %s\n")
+            % ("rev", "flag", "link", "p1", "p2", "nodeid".rjust(idlen))
         )
 
     for i in r:
@@ -1768,12 +1591,9 @@ def debugindex(ui, repo, file_=None, **opts) -> None:
             except Exception:
                 pp = [nullid, nullid]
             ui.write(
-                "% 6d % 9d % 7d % 6d % 7d %s %s %s\n"
+                "% 6d % 7d %s %s %s\n"
                 % (
                     i,
-                    r.start(i),
-                    r.length(i),
-                    base,
                     r.linkrev(i),
                     shortfn(node),
                     shortfn(pp[0]),
@@ -1783,14 +1603,10 @@ def debugindex(ui, repo, file_=None, **opts) -> None:
         elif format == 1:
             pr = r.parentrevs(i)
             ui.write(
-                "% 6d %04x % 8d % 8d % 8d % 6d % 6d % 6d % 6d %s\n"
+                "% 6d %04x % 6d % 6d % 6d %s\n"
                 % (
                     i,
                     r.flags(i),
-                    r.start(i),
-                    r.length(i),
-                    r.rawsize(i),
-                    base,
                     r.linkrev(i),
                     pr[0],
                     pr[1],
@@ -2509,7 +2325,7 @@ def debugpreviewbindag(ui, repo, path):
         for rev in reversed(revs):
             yield (rev, "C", dummyctx(rev), [("P", p) for p in parentrevs(rev)])
 
-    class dummyctx(object):
+    class dummyctx:
         """A dummy changeset object"""
 
         def __init__(self, id):
@@ -2972,264 +2788,6 @@ def debugrename(ui, repo, file1, *pats, **opts) -> None:
 
 
 @command(
-    "debugrevlog",
-    cmdutil.debugrevlogopts + [("d", "dump", False, _("dump index data"))],
-    _("-c|-m|FILE"),
-    optionalrepo=True,
-)
-def debugrevlog(ui, repo, file_=None, **opts) -> Optional[int]:
-    """show data and statistics about a revlog"""
-    r = cmdutil.openrevlog(repo, "debugrevlog", file_, opts)
-
-    if opts.get("dump"):
-        numrevs = len(r)
-        ui.write(
-            (
-                "# rev p1rev p2rev start   end deltastart base   p1   p2"
-                " rawsize totalsize compression heads chainlen\n"
-            )
-        )
-        ts = 0
-        heads = set()
-
-        for rev in range(numrevs):
-            dbase = r.deltaparent(rev)
-            if dbase == -1:
-                dbase = rev
-            cbase = r.chainbase(rev)
-            clen = r.chainlen(rev)
-            p1, p2 = r.parentrevs(rev)
-            rs = r.rawsize(rev)
-            ts = ts + rs
-            heads -= set(r.parentrevs(rev))
-            heads.add(rev)
-            try:
-                compression = ts / r.end(rev)
-            except ZeroDivisionError:
-                compression = 0
-            ui.write(
-                "%5d %5d %5d %5d %5d %10d %4d %4d %4d %7d %9d "
-                "%11d %5d %8d\n"
-                % (
-                    rev,
-                    p1,
-                    p2,
-                    r.start(rev),
-                    r.end(rev),
-                    r.start(dbase),
-                    r.start(cbase),
-                    r.start(p1),
-                    r.start(p2),
-                    rs,
-                    ts,
-                    compression,
-                    len(heads),
-                    clen,
-                )
-            )
-        return 0
-
-    v = r.version
-    format = v & 0xFFFF
-    flags = []
-    gdelta = False
-    if v & revlog.FLAG_INLINE_DATA:
-        flags.append("inline")
-    if v & revlog.FLAG_GENERALDELTA:
-        gdelta = True
-        flags.append("generaldelta")
-    if not flags:
-        flags = ["(none)"]
-
-    nummerges = 0
-    numfull = 0
-    numprev = 0
-    nump1 = 0
-    nump2 = 0
-    numother = 0
-    nump1prev = 0
-    nump2prev = 0
-    chainlengths = []
-    chainbases = []
-    chainspans = []
-
-    datasize = [None, 0, 0]
-    fullsize = [None, 0, 0]
-    deltasize = [None, 0, 0]
-    chunktypecounts = {}
-    chunktypesizes = {}
-
-    def addsize(size, l):
-        if l[0] is None or size < l[0]:
-            l[0] = size
-        if size > l[1]:
-            l[1] = size
-        l[2] += size
-
-    numrevs = len(r)
-    for rev in range(numrevs):
-        p1, p2 = r.parentrevs(rev)
-        delta = r.deltaparent(rev)
-        if format > 0:
-            addsize(r.rawsize(rev), datasize)
-        if p2 != nullrev:
-            nummerges += 1
-        size = r.length(rev)
-        if delta == nullrev:
-            chainlengths.append(0)
-            chainbases.append(r.start(rev))
-            chainspans.append(size)
-            numfull += 1
-            addsize(size, fullsize)
-        else:
-            chainlengths.append(chainlengths[delta] + 1)
-            baseaddr = chainbases[delta]
-            revaddr = r.start(rev)
-            chainbases.append(baseaddr)
-            chainspans.append((revaddr - baseaddr) + size)
-            addsize(size, deltasize)
-            if delta == rev - 1:
-                numprev += 1
-                if delta == p1:
-                    nump1prev += 1
-                elif delta == p2:
-                    nump2prev += 1
-            elif delta == p1:
-                nump1 += 1
-            elif delta == p2:
-                nump2 += 1
-            elif delta != nullrev:
-                numother += 1
-
-        # Obtain data on the raw chunks in the revlog.
-        segment = r._getsegmentforrevs(rev, rev)[1]
-        if segment:
-            chunktype = bytes(segment[0:1]).decode("utf8")
-        else:
-            chunktype = "empty"
-
-        if chunktype not in chunktypecounts:
-            chunktypecounts[chunktype] = 0
-            chunktypesizes[chunktype] = 0
-
-        chunktypecounts[chunktype] += 1
-        chunktypesizes[chunktype] += size
-
-    # Adjust size min value for empty cases
-    for size in (datasize, fullsize, deltasize):
-        if size[0] is None:
-            size[0] = 0
-
-    numdeltas = numrevs - numfull
-    numoprev = numprev - nump1prev - nump2prev
-    totalrawsize = datasize[2]
-    # pyre-fixme[16]: `Optional` has no attribute `__itruediv__`.
-    datasize[2] /= numrevs
-    fulltotal = fullsize[2]
-    fullsize[2] /= numfull
-    deltatotal = deltasize[2]
-    if numrevs - numfull > 0:
-        deltasize[2] /= numrevs - numfull
-    # pyre-fixme[58]: `+` is not supported for operand types `Optional[int]` and
-    #  `Optional[int]`.
-    totalsize = fulltotal + deltatotal
-    avgchainlen = sum(chainlengths) / numrevs
-    maxchainlen = max(chainlengths)
-    maxchainspan = max(chainspans)
-    compratio = 1
-    if totalsize:
-        # pyre-fixme[58]: `/` is not supported for operand types `Optional[int]` and
-        #  `Any`.
-        compratio = totalrawsize / totalsize
-
-    basedfmtstr = "%%%dd\n"
-    basepcfmtstr = "%%%dd %s(%%5.2f%%%%)\n"
-
-    def dfmtstr(max):
-        return basedfmtstr % len(str(max))
-
-    def pcfmtstr(max, padding=0):
-        return basepcfmtstr % (len(str(max)), " " * padding)
-
-    def pcfmt(value, total):
-        if total:
-            return (value, 100 * float(value) / total)
-        else:
-            return value, 100.0
-
-    ui.write(_x("format : %d\n") % format)
-    ui.write(_x("flags  : %s\n") % ", ".join(flags))
-
-    ui.write("\n")
-    fmt = pcfmtstr(totalsize)
-    fmt2 = dfmtstr(totalsize)
-    ui.write(_x("revisions     : ") + fmt2 % numrevs)
-    ui.write(_x("    merges    : ") + fmt % pcfmt(nummerges, numrevs))
-    ui.write(_x("    normal    : ") + fmt % pcfmt(numrevs - nummerges, numrevs))
-    ui.write(_x("revisions     : ") + fmt2 % numrevs)
-    ui.write(_x("    full      : ") + fmt % pcfmt(numfull, numrevs))
-    ui.write(_x("    deltas    : ") + fmt % pcfmt(numdeltas, numrevs))
-    ui.write(_x("revision size : ") + fmt2 % totalsize)
-    ui.write(_x("    full      : ") + fmt % pcfmt(fulltotal, totalsize))
-    ui.write(_x("    deltas    : ") + fmt % pcfmt(deltatotal, totalsize))
-
-    def fmtchunktype(chunktype):
-        if chunktype == "empty":
-            return "    %s     : " % chunktype
-        elif chunktype in string.ascii_letters:
-            return "    0x%s (%s)  : " % (
-                hex(chunktype[0].encode("utf8")),
-                chunktype[0],
-            )
-        else:
-            return "    0x%s      : " % hex(chunktype[0].encode("utf8"))
-
-    ui.write("\n")
-    ui.write(_x("chunks        : ") + fmt2 % numrevs)
-    for chunktype in sorted(chunktypecounts):
-        ui.write(fmtchunktype(chunktype))
-        ui.write(fmt % pcfmt(chunktypecounts[chunktype], numrevs))
-    ui.write(_x("chunks size   : ") + fmt2 % totalsize)
-    for chunktype in sorted(chunktypecounts):
-        ui.write(fmtchunktype(chunktype))
-        ui.write(fmt % pcfmt(chunktypesizes[chunktype], totalsize))
-
-    ui.write("\n")
-    fmt = dfmtstr(max(avgchainlen, maxchainlen, maxchainspan, compratio))
-    ui.write(_x("avg chain length  : ") + fmt % avgchainlen)
-    ui.write(_x("max chain length  : ") + fmt % maxchainlen)
-    ui.write(_x("max chain reach   : ") + fmt % maxchainspan)
-    ui.write(_x("compression ratio : ") + fmt % compratio)
-
-    if format > 0:
-        ui.write("\n")
-        ui.write(
-            _x("uncompressed data size (min/max/avg) : %d / %d / %d\n")
-            % tuple(datasize)
-        )
-    ui.write(
-        _x("full revision size (min/max/avg)     : %d / %d / %d\n") % tuple(fullsize)
-    )
-    ui.write(
-        _x("delta size (min/max/avg)             : %d / %d / %d\n") % tuple(deltasize)
-    )
-
-    if numdeltas > 0:
-        ui.write("\n")
-        fmt = pcfmtstr(numdeltas)
-        fmt2 = pcfmtstr(numdeltas, 4)
-        ui.write(_x("deltas against prev  : ") + fmt % pcfmt(numprev, numdeltas))
-        if numprev > 0:
-            ui.write(_x("    where prev = p1  : ") + fmt2 % pcfmt(nump1prev, numprev))
-            ui.write(_x("    where prev = p2  : ") + fmt2 % pcfmt(nump2prev, numprev))
-            ui.write(_x("    other            : ") + fmt2 % pcfmt(numoprev, numprev))
-        if gdelta:
-            ui.write(_x("deltas against p1    : ") + fmt % pcfmt(nump1, numdeltas))
-            ui.write(_x("deltas against p2    : ") + fmt % pcfmt(nump2, numdeltas))
-            ui.write(_x("deltas against other : ") + fmt % pcfmt(numother, numdeltas))
-
-
-@command(
     "debugrevspec",
     [
         ("", "optimize", None, _("print parsed tree after optimizing (DEPRECATED)")),
@@ -3661,7 +3219,6 @@ def debugvisibleheads(ui, repo, **opts) -> None:
 def debugwalk(ui, repo, *pats, **opts) -> None:
     """show how files match on given patterns"""
     m = scmutil.match(repo[None], pats, opts)
-    ui.write(_x("matcher: %r\n" % m))
     items = list(repo[None].walk(m))
     if not items:
         return
@@ -3840,7 +3397,7 @@ def debugcheckcasecollisions(ui, repo, *testfiles, **opts) -> int:
     # with anything in the list of files.  We can do this faster with a
     # treemanifest, so let's see if we've got one of those.
     treemanifest = _findtreemanifest(ctx)
-    if treemanifest and util.safehasattr(treemanifest, "listdir"):
+    if treemanifest and hasattr(treemanifest, "listdir"):
         for lowertf, (tf, tff) in lowertfs.items():
             if "/" in tf:
                 dir, base = tf.rsplit("/", 1)
@@ -4289,13 +3846,32 @@ def debugrevlogclone(ui, repo, source) -> None:
 )
 def debugcopytrace(ui, repo, *files, **opts) -> None:
     """trace the copy of the given files from source to dest commit"""
+
+    def format_trace_result(trace_result, src_path):
+        typ = trace_result["t"]
+        if typ == "NotFound":
+            return None
+        elif typ == "Renamed":
+            return trace_result["c"]
+        else:
+            node, path = trace_result["c"]
+            label = "being rebased" if typ == "Added" else "rebasing onto"
+            if path == src_path:
+                path_info = " "
+            else:
+                path_info = f" with name '{path}' "
+            return f"the missing file was {typ.lower()} by commit {short(node)}{path_info}in the branch {label}"
+
     csrc = scmutil.revsingle(repo, opts.get("source"))
     cdest = scmutil.revsingle(repo, opts.get("dest"))
 
     dag_copy_trace = repo._dagcopytrace
 
     res = {
-        src_path: dag_copy_trace.trace_rename(csrc.node(), cdest.node(), src_path)
+        src_path: format_trace_result(
+            dag_copy_trace.trace_rename_ex(csrc.node(), cdest.node(), src_path),
+            src_path,
+        )
         for src_path in files
     }
     ui.write(json.dumps(res))

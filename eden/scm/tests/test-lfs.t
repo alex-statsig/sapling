@@ -1,6 +1,3 @@
-  $ setconfig workingcopy.ruststatus=False
-  $ setconfig status.use-rust=False workingcopy.use-rust=False
-  $ disable treemanifest
   $ setconfig experimental.allowfilepeer=True
 # Initial setup
 
@@ -33,7 +30,7 @@
 # Ensure metadata is stored
   $ hg debugfilerev largefile -v
   00c137947d30: add large file
-   largefile: bin=0 lnk=0 flag=2000 size=1501 copied='' chain=1c509d1a5c8a
+   largefile: bin=0 lnk=0 flag=2000 size=1501 copied=''
     rawdata: 'version https://git-lfs.github.com/spec/v1\noid sha256:f11e77c257047a398492d8d6cb9f6acf3aa7c4384bb23080b43546053e183e4b\nsize 1501\nx-is-binary 0\n'
 
 # Check the blobstore is populated
@@ -147,20 +144,20 @@
 
   $ hg debugfilerev -r 'all()'
   fd47a419c4f7: commit with lfs content
-   large: bin=0 lnk=0 flag=2000 size=39 copied='' chain=2c531e0992ff
-   small: bin=0 lnk=0 flag=0 size=8 copied='' chain=b92a1ddc2cb0
+   large: bin=0 lnk=0 flag=2000 size=39 copied=''
+   small: bin=0 lnk=0 flag=0 size=8 copied=''
   514ca5454649: renames
-   l: bin=0 lnk=0 flag=2000 size=39 copied='large' chain=46a2f24864bc
-   s: bin=0 lnk=0 flag=0 size=8 copied='small' chain=594f4fdf95ce
+   l: bin=0 lnk=0 flag=2000 size=39 copied='large'
+   s: bin=0 lnk=0 flag=0 size=8 copied='small'
   e8e237bfd98f: large to small, small to large
-   l: bin=0 lnk=0 flag=0 size=6 copied='' chain=b484bd96359a
-   s: bin=0 lnk=0 flag=2000 size=27 copied='' chain=2521c65ce463
+   l: bin=0 lnk=0 flag=0 size=6 copied=''
+   s: bin=0 lnk=0 flag=2000 size=27 copied=''
   15c00ca48977: random modifications
-   l: bin=0 lnk=0 flag=0 size=8 copied='' chain=8f150b4b7e9f
-   s: bin=0 lnk=0 flag=2000 size=29 copied='' chain=552783341059
+   l: bin=0 lnk=0 flag=0 size=8 copied=''
+   s: bin=0 lnk=0 flag=2000 size=29 copied=''
   5adf850972b9: switch large and small again
-   l: bin=0 lnk=0 flag=2000 size=20 copied='' chain=6f1ff1f39c11
-   s: bin=0 lnk=0 flag=0 size=8 copied='' chain=0c1fa52a67c6
+   l: bin=0 lnk=0 flag=2000 size=20 copied=''
+   s: bin=0 lnk=0 flag=0 size=8 copied=''
 
 # Test lfs_files template
 
@@ -228,8 +225,8 @@
 
 # Test rename and status
 
-  $ hg init repo8
-  $ cd repo8
+  $ newclientrepo repo8
+  $ setconfig remotefilelog.lfs=true
   $ cat >> .hg/hgrc << EOF
   > [lfs]
   > threshold=10B
@@ -262,22 +259,16 @@
   9cd6bdffdac0 b
   7f96794915f7 a
 
-  $ hg debugfilerev -r 'all()' -v
+  $ hg debugfilerev -r 'all()'
   7f96794915f7: a
-   a1: bin=0 lnk=0 flag=2000 size=29 copied='' chain=be23af27908a
-    rawdata: 'version https://git-lfs.github.com/spec/v1\noid sha256:5bb8341bee63b3649f222b2215bde37322bea075a30575aa685d8f8d21c77024\nsize 29\nx-is-binary 0\n'
-   a2: bin=0 lnk=0 flag=0 size=6 copied='' chain=50470ad23cf9
-    rawdata: 'SMALL\n'
+   a1: bin=0 lnk=0 flag=0 size=29 copied=''
+   a2: bin=0 lnk=0 flag=0 size=6 copied=''
   9cd6bdffdac0: b
-   a1: bin=0 lnk=0 flag=0 size=6 copied='a2' chain=0d759f317f5a
-    rawdata: '\x01\ncopy: a2\ncopyrev: 50470ad23cf937b1f4b9f80bfe54df38e65b50d9\n\x01\nSMALL\n'
-   a2: bin=0 lnk=0 flag=2000 size=29 copied='a1' chain=b982e9429db8
-    rawdata: 'version https://git-lfs.github.com/spec/v1\noid sha256:5bb8341bee63b3649f222b2215bde37322bea075a30575aa685d8f8d21c77024\nsize 29\nx-hg-copy a1\nx-hg-copyrev be23af27908a582af43e5cda209a5a9b319de8d4\nx-is-binary 0\n'
+   a1: bin=0 lnk=0 flag=0 size=6 copied='a2'
+   a2: bin=0 lnk=0 flag=0 size=29 copied='a1'
   0fae949de7fa: meta
-   a1: bin=0 lnk=0 flag=0 size=11 copied='' chain=0984adb90885
-    rawdata: '\x01\n\x01\n\x01\nMETA\n'
-   a2: bin=0 lnk=0 flag=2000 size=32 copied='' chain=7691bcc594f0
-    rawdata: 'version https://git-lfs.github.com/spec/v1\noid sha256:876dadc86a8542f9798048f2c47f51dbf8e4359aed883e8ec80c5db825f0d943\nsize 32\nx-is-binary 0\n'
+   a1: bin=0 lnk=0 flag=0 size=7 copied=''
+   a2: bin=0 lnk=0 flag=0 size=32 copied=''
 
   $ cd ..
 
@@ -305,18 +296,17 @@
   4 changesets found
   uncompressed size of bundle content:
        * (changelog) (glob)
-       * (manifests) (glob)
       * a (glob)
   $ hg debugstrip -r 5b495c34b2630950b01ace9083c5260430bd2d52 --no-backup --force -q
   $ hg -R bundle.hg debugfilerev -r 'bundle()'
   5b495c34b263: a-two
-   a: bin=0 lnk=0 flag=2000 size=16 copied='' chain=4b09ab2030a1
+   a: bin=0 lnk=0 flag=2000 size=16 copied=''
   a887db3fdadc: a-three
-   a: bin=0 lnk=0 flag=2000 size=18 copied='' chain=d0f2c6cc8434
+   a: bin=0 lnk=0 flag=2000 size=18 copied=''
   617b75df8389: a-4
-   a: bin=0 lnk=0 flag=2000 size=14 copied='' chain=47910e2096f9
+   a: bin=0 lnk=0 flag=2000 size=14 copied=''
   8317d37315be: branching
-   a: bin=0 lnk=0 flag=2000 size=20 copied='' chain=d55fa5808479
+   a: bin=0 lnk=0 flag=2000 size=20 copied=''
   $ hg -R bundle.hg log -p -T '{desc}\n' a
   branching
   diff --git a/a b/a
@@ -494,6 +484,10 @@
 
   $ hg clone repo11 repo12 --noupdate
   $ cd repo12
+
+# Clear out store entries copied during the clone.
+  $ rm -rf .hg/store/lfs/objects
+
   $ hg log --removed -p a -T '{desc}\n' --config diff.nobinary=1 --git
   2
   diff --git a/a b/a
@@ -531,7 +525,7 @@
   >         fl = repo.file(name)
   >         if len(fl) == 0:
   >             continue
-  >         sizes = [revlog.revlog.rawsize(fl, i) for i in fl]
+  >         sizes = [fl.rawsize(i) for i in fl]
   >         texts = [fl.revision(i, raw=True) for i in fl]
   >         flags = [int(fl.flags(i)) for i in fl]
   >         hashes = [hash(t) for t in texts]
@@ -559,6 +553,7 @@
   repo: repo6
   repo: repo7
   repo: repo8
+  (pass --dag to perform slow checks with server)
   repo: repo9
   repo: repo10
 

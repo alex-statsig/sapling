@@ -1,11 +1,10 @@
-#chg-compatible
 #debugruntest-compatible
   $ setconfig experimental.nativecheckout=true
-  $ newserver server
+  $ configure modernclient
 
 test sparse
 
-  $ newremoterepo myrepo
+  $ newclientrepo
   $ enable sparse
 
   $ echo a > show

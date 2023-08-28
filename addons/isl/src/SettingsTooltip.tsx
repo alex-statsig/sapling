@@ -11,13 +11,16 @@ import type {ReactNode} from 'react';
 
 import {DropdownField, DropdownFields} from './DropdownFields';
 import {Tooltip} from './Tooltip';
-import {T} from './i18n';
+import {showDiffNumberConfig} from './codeReview/DiffBadge';
+import {debugToolsEnabledState} from './debug/DebugToolsState';
+import {t, T} from './i18n';
 import {SetConfigOperation} from './operations/SetConfigOperation';
 import platform from './platform';
 import {repositoryInfo, useRunOperation} from './serverAPIState';
 import {themeState} from './theme';
 import {
   VSCodeButton,
+  VSCodeCheckbox,
   VSCodeDropdown,
   VSCodeLink,
   VSCodeOption,
@@ -42,6 +45,7 @@ function SettingsDropdown() {
   const [theme, setTheme] = useRecoilState(themeState);
   const [repoInfo, setRepoInfo] = useRecoilState(repositoryInfo);
   const runOperation = useRunOperation();
+  const [showDiffNumber, setShowDiffNumber] = useRecoilState(showDiffNumberConfig);
   return (
     <DropdownFields title={<T>Settings</T>} icon="gear" data-testid="settings-dropdown">
       {platform.theme != null ? null : (
@@ -107,7 +111,33 @@ function SettingsDropdown() {
           </VSCodeDropdown>
         </Setting>
       ) : null}
+      <Setting title={<T>Show Diff Numbers</T>}>
+        <VSCodeCheckbox
+          checked={showDiffNumber}
+          onChange={e => {
+            setShowDiffNumber((e.target as HTMLInputElement).checked);
+          }}>
+          <T>Show copyable Diff / Pull Request numbers inline for each commit</T>
+        </VSCodeCheckbox>
+      </Setting>
+      <DebugToolsField />
     </DropdownFields>
+  );
+}
+
+function DebugToolsField() {
+  const [isDebug, setIsDebug] = useRecoilState(debugToolsEnabledState);
+
+  return (
+    <DropdownField title={t('Debug Tools')}>
+      <VSCodeCheckbox
+        checked={isDebug}
+        onChange={e => {
+          setIsDebug((e.target as HTMLInputElement).checked);
+        }}>
+        <T>Enable Debug Tools</T>
+      </VSCodeCheckbox>
+    </DropdownField>
   );
 }
 

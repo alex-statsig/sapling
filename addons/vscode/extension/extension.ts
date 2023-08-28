@@ -9,7 +9,8 @@ import type {Logger} from 'isl-server/src/logger';
 
 import packageJson from '../package.json';
 import {registerSaplingDiffContentProvider} from './DiffContentProvider';
-import {watchAndCreateRepositoriesForWorkspaceFolders} from './VSCodeRepo';
+import {VSCodeReposList} from './VSCodeRepo';
+import {InlineBlameProvider} from './blame/blame';
 import {registerCommands} from './commands';
 import {ensureTranslationsLoaded} from './i18n';
 import {registerISLCommands} from './islWebviewPanel';
@@ -26,7 +27,9 @@ export async function activate(context: vscode.ExtensionContext) {
     await ensureTranslationsLoaded(context);
     context.subscriptions.push(registerISLCommands(context, logger));
     context.subscriptions.push(outputChannel);
-    context.subscriptions.push(watchAndCreateRepositoriesForWorkspaceFolders(logger));
+    const reposList = new VSCodeReposList(logger);
+    context.subscriptions.push(reposList);
+    context.subscriptions.push(new InlineBlameProvider(reposList, logger, extensionTracker));
     context.subscriptions.push(registerSaplingDiffContentProvider(logger));
     context.subscriptions.push(...registerCommands(extensionTracker));
     extensionTracker.track('VSCodeExtensionActivated', {duration: Date.now() - start});

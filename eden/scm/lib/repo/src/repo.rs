@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(feature = "wdir")]
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -26,6 +27,7 @@ use edenapi::EdenApiError;
 use hgcommits::DagCommits;
 use metalog::MetaLog;
 use once_cell::sync::Lazy;
+#[cfg(feature = "wdir")]
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use repolock::RepoLocker;
@@ -36,20 +38,27 @@ use revisionstore::trait_impls::ArcFileStore;
 use revisionstore::EdenApiFileStore;
 use revisionstore::EdenApiTreeStore;
 use revisionstore::MemcacheStore;
+use revsets::errors::RevsetLookupError;
 use revsets::utils as revset_utils;
 use storemodel::ReadFileContents;
 use storemodel::RefreshableReadFileContents;
 use storemodel::RefreshableTreeStore;
 use storemodel::TreeStore;
+#[cfg(feature = "wdir")]
 use treestate::dirstate::Dirstate;
+#[cfg(feature = "wdir")]
 use treestate::dirstate::TreeStateFields;
+#[cfg(feature = "wdir")]
 use treestate::serialization::Serializable;
 use treestate::treestate::TreeState;
 use types::repo::StorageFormat;
 use types::HgId;
 use util::path::absolute;
+#[cfg(feature = "wdir")]
 use vfs::VFS;
+#[cfg(feature = "wdir")]
 use workingcopy::filesystem::FileSystemType;
+#[cfg(feature = "wdir")]
 use workingcopy::workingcopy::WorkingCopy;
 
 use crate::commits::open_dag_commits;
@@ -292,11 +301,22 @@ impl Repo {
         self.store_path.join("metalog")
     }
 
-    /// Constructs the EdenAPI client.
+    /// Constructs the EdenAPI client. Errors out if the EdenAPI should not be
+    /// constructed.
     ///
-    /// This requires configs like `paths.default`. Avoid calling this function for
-    /// local-only operations.
+    /// Use `optional_eden_api` if `EdenAPI` is optional.
     pub fn eden_api(&mut self) -> Result<Arc<dyn EdenApi>, EdenApiError> {
+        match self.optional_eden_api()? {
+            Some(v) => Ok(v),
+            None => Err(EdenApiError::Other(anyhow!(
+                "EdenAPI is requested but not available for this repo"
+            ))),
+        }
+    }
+
+    /// Private API used by `optional_eden_api` that bypasses checks about whether
+    /// EdenAPI should be used or not.
+    fn force_construct_eden_api(&mut self) -> Result<Arc<dyn EdenApi>, EdenApiError> {
         match &self.eden_api {
             Some(eden_api) => Ok(eden_api.clone()),
             None => {
@@ -317,6 +337,10 @@ impl Repo {
     ///
     /// Returns `None` if EdenAPI should not be used.
     pub fn optional_eden_api(&mut self) -> Result<Option<Arc<dyn EdenApi>>, EdenApiError> {
+        if self.store_requirements.contains("git") {
+            tracing::trace!(target: "repo::eden_api", "disabled because of git");
+            return Ok(None);
+        }
         if matches!(
             self.config.get_opt::<bool>("edenapi", "enable"),
             Ok(Some(false))
@@ -337,7 +361,7 @@ impl Repo {
                     || (!path.contains("://") && EagerRepo::url_to_dir(&path).is_some())
                 {
                     tracing::trace!(target: "repo::eden_api", "using EagerRepo at {}", &path);
-                    return Ok(Some(self.eden_api()?));
+                    return Ok(Some(self.force_construct_eden_api()?));
                 }
                 // Legacy tests are incompatible with EdenAPI.
                 // They use None or file or ssh scheme with dummyssh.
@@ -368,7 +392,7 @@ impl Repo {
                 tracing::trace!(target: "repo::eden_api", "proceeding with path {}, reponame {:?}", path, self.config.get("remotefilelog", "reponame"));
             }
         }
-        Ok(Some(self.eden_api()?))
+        Ok(Some(self.force_construct_eden_api()?))
     }
 
     pub fn dag_commits(&mut self) -> Result<Arc<RwLock<Box<dyn DagCommits + Send + 'static>>>> {
@@ -399,6 +423,20 @@ impl Repo {
         }
     }
 
+    pub fn set_remote_bookmarks(&mut self, names: &BTreeMap<String, HgId>) -> Result<()> {
+        self.metalog()?
+            .write()
+            .set("remotenames", &refencode::encode_remotenames(names))?;
+        Ok(())
+    }
+
+    pub fn local_bookmarks(&mut self) -> Result<BTreeMap<String, HgId>> {
+        match self.metalog()?.read().get("bookmarks")? {
+            Some(rn) => Ok(refencode::decode_bookmarks(&rn)?),
+            None => Err(errors::RemotenamesMetalogKeyError.into()),
+        }
+    }
+
     pub fn add_requirement(&mut self, requirement: &str) -> Result<()> {
         self.requirements.add(requirement);
         self.requirements.flush()?;
@@ -412,7 +450,7 @@ impl Repo {
     }
 
     pub fn storage_format(&self) -> StorageFormat {
-        if self.store_requirements.contains("remotefilelog") {
+        let format = if self.requirements.contains("remotefilelog") {
             StorageFormat::RemoteFilelog
         } else if self.store_requirements.contains("git") {
             StorageFormat::Git
@@ -420,7 +458,9 @@ impl Repo {
             StorageFormat::Eagerepo
         } else {
             StorageFormat::Revlog
-        }
+        };
+        tracing::trace!("storage_format is {:?}", &format);
+        format
     }
 
     fn git_dir(&self) -> Result<PathBuf> {
@@ -538,14 +578,37 @@ impl Repo {
         ))
     }
 
-    pub fn resolve_commit(&mut self, treestate: &TreeState, change_id: &str) -> Result<HgId> {
+    pub fn resolve_commit(
+        &mut self,
+        treestate: Option<&TreeState>,
+        change_id: &str,
+    ) -> Result<HgId> {
+        let id_map = self.dag_commits()?.read().id_map_snapshot()?;
+        let metalog = self.metalog()?;
+        let metalog = metalog.read();
+        let edenapi = self.optional_eden_api()?;
         revset_utils::resolve_single(
+            &self.config,
             change_id,
-            self.dag_commits()?.read().id_map_snapshot()?.as_ref(),
-            &*self.metalog()?.read(),
+            &id_map,
+            &metalog,
             treestate,
+            edenapi.as_deref(),
         )
-        .map_err(|e| e.into())
+    }
+
+    pub fn resolve_commit_opt(
+        &mut self,
+        treestate: Option<&TreeState>,
+        change_id: &str,
+    ) -> Result<Option<HgId>> {
+        match self.resolve_commit(treestate, change_id) {
+            Ok(id) => Ok(Some(id)),
+            Err(err) => match err.downcast_ref::<RevsetLookupError>() {
+                Some(RevsetLookupError::RevsetNotFound(_)) => Ok(None),
+                _ => Err(err),
+            },
+        }
     }
 
     pub fn invalidate_stores(&mut self) -> Result<()> {
@@ -558,6 +621,7 @@ impl Repo {
         Ok(())
     }
 
+    #[cfg(feature = "wdir")]
     pub fn working_copy(&mut self, path: &Path) -> Result<WorkingCopy, errors::InvalidWorkingCopy> {
         let is_eden = self.requirements.contains("eden");
         let fsmonitor_ext = self.config.get("extensions", "fsmonitor");
@@ -676,6 +740,7 @@ impl Repo {
             // Set both stores to share underlying git store.
             self.file_store = Some(git_store.clone());
             self.tree_store = Some(git_store.clone());
+            tracing::trace!(target: "repo::file_store", "creating git file and tree store");
             return Ok(Some((git_store.clone(), git_store)));
         }
         if self.storage_format().is_eager() {
@@ -684,6 +749,7 @@ impl Repo {
             let store = Arc::new(store);
             self.file_store = Some(store.clone());
             self.tree_store = Some(store.clone());
+            tracing::trace!(target: "repo::file_store", "creating EagerRepo file and tree store");
             return Ok(Some((store.clone(), store)));
         }
         return Ok(None);

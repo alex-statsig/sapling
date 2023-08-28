@@ -45,9 +45,11 @@ void createGoldMasterOverlay(AbsolutePath overlayPath) {
   auto overlay = Overlay::create(
       overlayPath,
       CaseSensitivity::Sensitive,
-      Overlay::InodeCatalogType::Legacy,
+      InodeCatalogType::Legacy,
+      kDefaultInodeCatalogOptions,
       std::make_shared<NullStructuredLogger>(),
       makeRefPtr<EdenStats>(),
+      true,
       *EdenConfig::createTestEdenConfig());
 
   auto fileInode = overlay->allocateInodeNumber();

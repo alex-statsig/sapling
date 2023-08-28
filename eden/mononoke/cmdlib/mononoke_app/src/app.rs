@@ -21,6 +21,7 @@ use anyhow::Context;
 use anyhow::Result;
 use base_app::BaseApp;
 use blobstore::Blobstore;
+use blobstore::BlobstoreUnlinkOps;
 use blobstore_factory::BlobstoreOptions;
 use blobstore_factory::ReadOnlyStorage;
 use cached_config::ConfigStore;
@@ -745,7 +746,7 @@ impl MononokeApp {
     ) -> Result<Arc<dyn Blobstore>> {
         let repo_configs = self.repo_configs();
         let storage_configs = self.storage_configs();
-        let (mut repo_id, redaction, mut storage_config) =
+        let (mut repo_id, mut redaction, mut storage_config) =
             if let Some(repo_id) = repo_blobstore_args.repo_id {
                 let repo_id = RepositoryId::new(repo_id);
                 let (_repo_name, repo_config) = repo_configs
@@ -803,6 +804,10 @@ impl MononokeApp {
             PrefixBlobstore::new(blobstore, String::new())
         };
 
+        if repo_blobstore_args.bypass_redaction {
+            redaction = Redaction::Disabled;
+        }
+
         let blobstore = if redaction == Redaction::Enabled {
             let redacted_blobs = self
                 .repo_factory
@@ -822,6 +827,15 @@ impl MononokeApp {
         };
 
         Ok(blobstore)
+    }
+
+    pub async fn open_blobstore_unlink_ops_with_overriden_blob_config(
+        &self,
+        config: &BlobConfig,
+    ) -> Result<Arc<dyn BlobstoreUnlinkOps>> {
+        self.repo_factory
+            .blobstore_unlink_ops_with_overriden_blob_config(config)
+            .await
     }
 
     pub async fn redaction_config_blobstore(&self) -> Result<Arc<RedactionConfigBlobstore>> {

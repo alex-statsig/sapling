@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.1.22
+
+- Syntax highlighting in comparison view
+- Add option to "amend changes to here" when right clicking a commit
+- Add ellipsis to file path overflow
+- Collapse some files by default in the comparison view for performance
+- Timeout some commands to prevent hanging issue
+- Fix commit highlighting on hover not going away
+- Improve drag target size for commits in drag and drop rebase
+- Improve rendering comparison view file banners, such as "this file was renamed"
+
+## 0.1.21
+
+- Selection and copying from comparison view stays within the before/after sides
+- Support collapsing files in the comparison view
+- More consistent styling in the comparison view
+- Add succession tracking for smoother previews of goto
+- Propagate unsaved edited commit messages when a commit is amended
+- Improved optimistic state when hiding commits
+- Add "cleanup" button to quickly hide landed commits
+- Fix commit download box missing some inputs
+- Fix tab ordering in commit info view
+
+## 0.1.20
+
+- Add badge for review decision for GitHub PRs
+- Add button to open all changed files in a commit
+- Add debugging tools
+- Fix missing help buttons if commits fail to load
+
+## 0.1.19
+
+- Add context menu to files to copy paths and open diff views
+- Fix visual overflow in commit messages
+- Allow amending with only message changes
+
+## 0.1.18
+
+- Allow pressing Enter to quick commit
+- Add button to open a file in the comparison view
+- Add tooltip to copy filenames in the comparison view
+- Fix white line artifact when selecting a commit
+- Fix PR links in blame hover
+
+## 0.1.17
+
+- Add dropdown to pull a specific commit from remote
+- Experimental partial commit UI hidden behind `isl.experimental-features` config
+- Thanks to [@alex-statsig](https://github.com/alex-statsig) for several contributions in this release:
+  - [Experimental inline blame annotations, disabled in settings by default](https://github.com/facebook/sapling/pull/640)
+  - [Fix diff views being backwards](https://github.com/facebook/sapling/pull/637)
+  - [Fix missing data until first poll](https://github.com/facebook/sapling/pull/638)
+  - [Fix github CI status check](https://github.com/facebook/sapling/pull/651)
+
 ## 0.1.16
 
 - Add "Edit stack" to reorder, drop, or fold stacked commits

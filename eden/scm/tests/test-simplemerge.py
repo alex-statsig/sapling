@@ -1,3 +1,4 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # Copyright (C) 2004, 2005 Canonical Ltd
 #
 # This program is free software; you can redistribute it and/or modify
@@ -17,33 +18,30 @@ from __future__ import absolute_import
 
 import unittest
 
-from edenscm import error, simplemerge, util
-from edenscm.pycompat import decodeutf8, encodeutf8
-from hghave import require
+from edenscm import error, util
+from edenscm.pycompat import decodeutf8
+from edenscm.simplemerge import Merge3Text, wordmergemode
 
 
 TestCase = unittest.TestCase
 # bzr compatible interface, for the tests
-class Merge3(simplemerge.Merge3Text):
+class Merge3(Merge3Text):
     """3-way merge of texts.
 
     Given BASE, OTHER, THIS, tries to produce a combined text
     incorporating the changes from both BASE->OTHER and BASE->THIS.
     All three will typically be sequences of lines."""
 
-    def __init__(self, base, a, b):
+    def __init__(self, base, a, b, wordmerge=wordmergemode.disabled):
         basetext = b"\n".join([i.strip(b"\n") for i in base] + [b""])
         atext = b"\n".join([i.strip(b"\n") for i in a] + [b""])
         btext = b"\n".join([i.strip(b"\n") for i in b] + [b""])
         if util.binary(basetext) or util.binary(atext) or util.binary(btext):
             raise error.Abort("don't know how to merge binary files")
-        simplemerge.Merge3Text.__init__(self, basetext, atext, btext)
+        Merge3Text.__init__(self, basetext, atext, btext, wordmerge=wordmerge)
         self.base = base
         self.a = a
         self.b = b
-
-
-CantReprocessAndShowBase = simplemerge.CantReprocessAndShowBase
 
 
 def split_lines(t):
@@ -365,6 +363,33 @@ bbb
             b"<<<<<<< OTHER\rc\r=======\rb\r" b">>>>>>> THIS\r".splitlines(True),
             list(m_lines),
         )
+
+    def test_adjacent_import_line_changes_with_wordmerge(self):
+        base_text = b"""
+import {List} from 'immutable';
+import {cacheMethod} from 'shared/LRU';
+"""
+        this_text = b"""
+import {List, Record} from 'immutable';
+import {cacheMethod} from 'shared/LRU';
+"""
+        other_text = b"""
+import {List} from 'immutable';
+import {cached, LRU} from 'shared/LRU';
+"""
+        expected = b"""
+import {List, Record} from 'immutable';
+import {cached, LRU} from 'shared/LRU';
+"""
+        m3 = Merge3(
+            base_text.splitlines(True),
+            other_text.splitlines(True),
+            this_text.splitlines(True),
+            wordmerge=wordmergemode.ondemand,
+        )
+        m_lines = m3.merge_lines(b"OTHER", b"THIS")
+        self.assertEqual(expected.splitlines(True), list(m_lines))
+        self.assertEqual(0, m3.conflictscount)
 
 
 if __name__ == "__main__":

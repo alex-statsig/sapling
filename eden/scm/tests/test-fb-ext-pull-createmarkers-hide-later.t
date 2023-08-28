@@ -6,7 +6,6 @@ Setup
   $ enable amend pullcreatemarkers pushrebase rebase remotenames
   $ setconfig ui.username="nobody <no.reply@fb.com>" experimental.rebaseskipobsolete=true
   $ setconfig remotenames.allownonfastforward=true
-  $ setconfig pullcreatemarkers.use-graphql=false
   $ setconfig extensions.arcconfig="$TESTDIR/../edenscm/ext/extlib/phabricator/arcconfig.py"
 
 Test that hg pull creates obsolescence markers for landed diffs
@@ -26,6 +25,7 @@ Test that hg pull creates obsolescence markers for landed diffs
   > }
   $ landed_graphql() {
   >   printf '{"number": %s, ' $1
+  >   printf '"diff_status_name": "Closed",'
   >   printf '"phabricator_versions": { "nodes": [] }, "phabricator_diff_commit": '
   >   printf '{ "nodes": [{"commit_identifier": "%s"}]}}' $2
   > }

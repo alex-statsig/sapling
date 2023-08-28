@@ -948,7 +948,7 @@ def killdaemons(pidfile):
 
 if os.name == "nt":
 
-    class ProcessGroup(object):
+    class ProcessGroup:
         """Process group backed by Windows JobObject.
 
         It provides a clean way to kill processes recursively.
@@ -976,7 +976,7 @@ if os.name == "nt":
 
 else:
 
-    class ProcessGroup(object):
+    class ProcessGroup:
         """Fallback implementation on *nix. Kill process groups.
 
         This is less reliable than Windows' JobObject, because child processes
@@ -1786,7 +1786,7 @@ class TTest(Test):
             self._refout = lines
 
         salt, saltcount, script, after, expected = self._parsetest(lines)
-        self.progress = (0, saltcount)
+        self.progress = (0, saltcount, 0)
 
         # Write out the generated script.
         fname = "%s.sh" % self._testtmp
@@ -1802,7 +1802,11 @@ class TTest(Test):
         def linecallback(line):
             if salt in line:
                 saltseen[0] += 1
-                self.progress = (saltseen[0], saltcount)
+                try:
+                    linenum = int(line.split()[1].decode("utf-8")) + 1
+                except Exception:
+                    linenum = "?"
+                self.progress = (saltseen[0], saltcount, linenum)
 
         exitcode, output = self._runcommand(cmd, env, linecallback=linecallback)
 
@@ -2286,7 +2290,7 @@ firsterror = False
 _iolock = RLock()
 
 
-class Progress(object):
+class Progress:
     def __init__(self):
         self.lines = []
         self.out = sys.stderr
@@ -2380,7 +2384,7 @@ if showprogress and os.name == "nt":
                     showprogress = False
 
 
-class IOLockWithProgress(object):
+class IOLockWithProgress:
     def __enter__(self):
         _iolock.acquire()
         progress.clear()
@@ -2750,16 +2754,17 @@ class TestSuite(unittest.TestSuite):
                         time.sleep(0.1)
                 count += 1
 
-        def singleprogressbar(value, total, char="="):
+        def singleprogressbar(value, total, width=14, char="="):
+            barwidth = width - 2
             if total:
                 if value > total:
                     value = total
-                progresschars = char * int(value * 20 / total)
-                if progresschars and len(progresschars) < 20:
+                progresschars = char * int(value * barwidth / total)
+                if progresschars and len(progresschars) < barwidth:
                     progresschars += ">"
-                return "[%-20s]" % progresschars
+                return "[%-*s]" % (barwidth, progresschars)
             else:
-                return " " * 22
+                return " " * width
 
         blacklisted = len(result.skipped)
         initialtestsrun = result.testsRun
@@ -2780,20 +2785,23 @@ class TestSuite(unittest.TestSuite):
                 runningfrac = 0.0
                 for name, (test, teststart) in runningtests.items():
                     try:
-                        saltseen, saltcount = getattr(test, "progress")
+                        saltseen, saltcount, linenum = getattr(test, "progress")
                         runningfrac += saltseen * 1.0 / saltcount
                         testprogress = singleprogressbar(saltseen, saltcount, char="-")
+                        linenum = "(%4s)" % linenum
                     except Exception:
                         testprogress = singleprogressbar(0, 0)
+                        linenum = " " * 6
                     lines.append(
-                        "%s %-52s %.1fs" % (testprogress, name[:52], now - teststart)
+                        "%s %s %-52s %.1fs"
+                        % (testprogress, linenum, name[:52], now - teststart)
                     )
+                progfrac = runningfrac + failed + passed + skipped
                 lines[0:0] = [
-                    "%s %-52s %.1fs"
+                    "%s (%3s%%) %-52s %.1fs"
                     % (
-                        singleprogressbar(
-                            runningfrac + failed + passed + skipped, total
-                        ),
+                        singleprogressbar(progfrac, total),
+                        int(progfrac * 100 / total) if total else 0,
                         "%s Passed. %s Failed. %s Skipped. %s Remaining"
                         % (passed, failed, skipped, remaining),
                         timepassed,
@@ -3189,7 +3197,7 @@ class TextTestRunner(unittest.TextTestRunner):
         )
 
 
-class TestpilotTestResult(object):
+class TestpilotTestResult:
     def __init__(self, testpilotjson):
         self.testsSkipped = 0
         self.errors = 0
@@ -3207,7 +3215,7 @@ class TestpilotTestResult(object):
                         self.errors += 1
 
 
-class TestpilotTestRunner(object):
+class TestpilotTestRunner:
     def __init__(self, runner):
         self._runner = runner
 
@@ -3254,7 +3262,7 @@ class TestpilotTestRunner(object):
         return TestpilotTestResult(testpilotjson)
 
 
-class TestRunner(object):
+class TestRunner:
     """Holds context for executing tests.
 
     Tests rely on a lot of state. This object holds it for them.

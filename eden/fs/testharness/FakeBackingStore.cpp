@@ -5,7 +5,7 @@
  * GNU General Public License version 2.
  */
 
-#include "FakeBackingStore.h"
+#include "eden/fs/testharness/FakeBackingStore.h"
 
 #include <fmt/format.h>
 #include <folly/MapUtil.h>
@@ -59,7 +59,7 @@ FakeBackingStore::getTreeEntryForObjectId(
       std::make_shared<TreeEntry>(commitID, treeEntryType));
 }
 
-ImmediateFuture<TreePtr> FakeBackingStore::getRootTree(
+ImmediateFuture<BackingStore::GetRootTreeResult> FakeBackingStore::getRootTree(
     const RootId& commitID,
     const ObjectFetchContextPtr& /*context*/) {
   StoredHash* storedTreeHash;
@@ -86,6 +86,9 @@ ImmediateFuture<TreePtr> FakeBackingStore::getRootTree(
         }
 
         return treeIter->second->getFuture();
+      })
+      .thenValue([storedTreeHash](TreePtr tree) {
+        return GetRootTreeResult{tree, storedTreeHash->get()};
       })
       .semi();
 }
@@ -154,43 +157,41 @@ FakeBackingStore::getBlobMetadata(
 }
 
 Blob FakeBackingStore::makeBlob(folly::StringPiece contents) {
-  return makeBlob(ObjectId::sha1(contents), contents);
+  return Blob{IOBuf{IOBuf::COPY_BUFFER, ByteRange{contents}}};
 }
 
-Blob FakeBackingStore::makeBlob(ObjectId hash, folly::StringPiece contents) {
-  auto buf = IOBuf{IOBuf::COPY_BUFFER, ByteRange{contents}};
-  return Blob(hash, std::move(buf));
-}
-
-StoredBlob* FakeBackingStore::putBlob(StringPiece contents) {
-  return putBlob(ObjectId::sha1(contents), contents);
+std::pair<StoredBlob*, ObjectId> FakeBackingStore::putBlob(
+    StringPiece contents) {
+  ObjectId id = ObjectId::sha1(contents);
+  return {putBlob(id, contents), id};
 }
 
 StoredBlob* FakeBackingStore::putBlob(
     ObjectId hash,
     folly::StringPiece contents) {
-  auto ret = maybePutBlob(hash, contents);
-  if (!ret.second) {
+  auto [storedBlob, id, inserted] = maybePutBlob(hash, contents);
+  if (!inserted) {
     throw std::domain_error(
         fmt::format("blob with hash {} already exists", hash));
   }
-  return ret.first;
+  return storedBlob;
 }
 
-std::pair<StoredBlob*, bool> FakeBackingStore::maybePutBlob(
+std::tuple<StoredBlob*, ObjectId, bool> FakeBackingStore::maybePutBlob(
     folly::StringPiece contents) {
   return maybePutBlob(ObjectId::sha1(contents), contents);
 }
 
-std::pair<StoredBlob*, bool> FakeBackingStore::maybePutBlob(
+std::tuple<StoredBlob*, ObjectId, bool> FakeBackingStore::maybePutBlob(
     ObjectId hash,
     folly::StringPiece contents) {
-  auto storedBlob = make_unique<StoredBlob>(makeBlob(hash, contents));
+  auto storedBlob = make_unique<StoredBlob>(makeBlob(contents));
 
   {
     auto data = data_.wlock();
     auto ret = data->blobs.emplace(hash, std::move(storedBlob));
-    return std::make_pair(ret.first->second.get(), ret.second);
+    return std::make_tuple(
+        ret.first->second.get(), std::move(hash), ret.second);
   }
 }
 
@@ -208,19 +209,19 @@ static TreeEntryType treeEntryTypeFromBlobType(FakeBlobType type) {
 
 FakeBackingStore::TreeEntryData::TreeEntryData(
     folly::StringPiece name,
-    const Blob& blob,
+    const ObjectId& id,
     FakeBlobType type)
     : entry{
           PathComponent{name},
-          TreeEntry{blob.getHash(), treeEntryTypeFromBlobType(type)}} {}
+          TreeEntry{id, treeEntryTypeFromBlobType(type)}} {}
 
 FakeBackingStore::TreeEntryData::TreeEntryData(
     folly::StringPiece name,
-    const StoredBlob* blob,
+    const std::pair<StoredBlob*, ObjectId>& blob,
     FakeBlobType type)
     : entry{
           PathComponent{name},
-          TreeEntry{blob->get().getHash(), treeEntryTypeFromBlobType(type)}} {}
+          TreeEntry{blob.second, treeEntryTypeFromBlobType(type)}} {}
 
 FakeBackingStore::TreeEntryData::TreeEntryData(
     folly::StringPiece name,

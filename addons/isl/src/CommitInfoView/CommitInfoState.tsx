@@ -5,10 +5,15 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import type {Hash} from '../types';
+import type {CommitInfo, Hash} from '../types';
 import type {CommitMessageFields, FieldsBeingEdited} from './types';
 
+import {globalRecoil} from '../AccessGlobalRecoil';
 import serverAPI from '../ClientToServerAPI';
+import {successionTracker} from '../SuccessionTracker';
+import {latestCommitMessage} from '../codeReview/CodeReviewInfo';
+import {treeWithPreviews} from '../previews';
+import {selectedCommitInfos} from '../selection';
 import {latestCommitTreeMap} from '../serverAPIState';
 import {firstLine} from '../utils';
 import {
@@ -17,7 +22,7 @@ import {
   findFieldsBeingEdited,
   emptyCommitMessageFields,
 } from './CommitMessageFields';
-import {atomFamily, selectorFamily, atom} from 'recoil';
+import {atomFamily, selectorFamily, atom, selector} from 'recoil';
 
 export type EditedMessage = {fields: CommitMessageFields};
 
@@ -98,14 +103,19 @@ export const editedCommitMessages = atomFamily<EditedMessageUnlessOptimistic, Ha
         if (info == null) {
           return {type: 'optimistic'};
         }
-        const fields = parseCommitMessageFields(
-          get(commitMessageFieldsSchema),
-          info.title,
-          info.description,
-        );
+        const [title, description] = get(latestCommitMessage(info.hash));
+        const fields = parseCommitMessageFields(get(commitMessageFieldsSchema), title, description);
         return {fields};
       },
   }),
+});
+successionTracker.onSuccessions(successions => {
+  for (const [oldHash, newHash] of successions) {
+    const existing = globalRecoil().getLoadable(editedCommitMessages(oldHash));
+    if (existing.state === 'hasValue') {
+      globalRecoil().set(editedCommitMessages(newHash), existing.valueOrThrow());
+    }
+  }
 });
 
 export const hasUnsavedEditedCommitMessage = selectorFamily<boolean, Hash | 'head'>({
@@ -120,14 +130,9 @@ export const hasUnsavedEditedCommitMessage = selectorFamily<boolean, Hash | 'hea
       if (hash === 'head') {
         return Object.values(edited).some(Boolean);
       }
-      // TODO: T149536695 use treeWithPreviews so this indicator is accurate on top of previews
-      const original = get(latestCommitTreeMap).get(hash)?.info;
+      const [originalTitle, originalDescription] = get(latestCommitMessage(hash));
       const schema = get(commitMessageFieldsSchema);
-      const parsed = parseCommitMessageFields(
-        schema,
-        original?.title ?? '',
-        original?.description ?? '',
-      );
+      const parsed = parseCommitMessageFields(schema, originalTitle, originalDescription);
       return Object.values(findFieldsBeingEdited(schema, edited.fields, parsed)).some(Boolean);
     },
 });
@@ -140,4 +145,23 @@ export const commitFieldsBeingEdited = atom<FieldsBeingEdited>({
 export const commitMode = atom<CommitInfoMode>({
   key: 'commitMode',
   default: 'amend',
+});
+
+export const commitInfoViewCurrentCommits = selector<Array<CommitInfo> | null>({
+  key: 'commitInfoViewCurrentCommits',
+  get: ({get}) => {
+    const selected = get(selectedCommitInfos);
+
+    const {headCommit} = get(treeWithPreviews);
+
+    // show selected commit, if there's exactly 1
+    const selectedCommit = selected.length === 1 ? selected[0] : undefined;
+    const commit = selectedCommit ?? headCommit;
+
+    if (commit == null) {
+      return null;
+    } else {
+      return selected.length > 1 ? selected : [commit];
+    }
+  },
 });

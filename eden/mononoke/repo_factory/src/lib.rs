@@ -21,9 +21,11 @@ use anyhow::Result;
 use async_once_cell::AsyncOnceCell;
 use blobstore::Blobstore;
 use blobstore::BlobstoreEnumerableWithUnlink;
+use blobstore::BlobstoreUnlinkOps;
 use blobstore_factory::default_scrub_handler;
 use blobstore_factory::make_blobstore;
 use blobstore_factory::make_blobstore_enumerable_with_unlink;
+use blobstore_factory::make_blobstore_unlink_ops;
 pub use blobstore_factory::BlobstoreOptions;
 use blobstore_factory::ComponentSamplingHandler;
 use blobstore_factory::MetadataSqlFactory;
@@ -90,6 +92,8 @@ use filenodes::ArcFilenodes;
 use filestore::ArcFilestoreConfig;
 use filestore::FilestoreConfig;
 use futures_watchdog::WatchdogExt;
+use git_symbolic_refs::ArcGitSymbolicRefs;
+use git_symbolic_refs::SqlGitSymbolicRefsBuilder;
 use hooks::hook_loader::load_hooks;
 use hooks::ArcHookManager;
 use hooks::HookManager;
@@ -125,10 +129,11 @@ use readonlyblob::ReadOnlyBlobstore;
 use redactedblobstore::ArcRedactionConfigBlobstore;
 use redactedblobstore::RedactedBlobs;
 use redactedblobstore::RedactionConfigBlobstore;
-use redactedblobstore::SqlRedactedContentStore;
 use rendezvous::RendezVousOptions;
 use repo_blobstore::ArcRepoBlobstore;
+use repo_blobstore::ArcRepoBlobstoreUnlinkOps;
 use repo_blobstore::RepoBlobstore;
+use repo_blobstore::RepoBlobstoreUnlinkOps;
 use repo_bookmark_attrs::ArcRepoBookmarkAttrs;
 use repo_bookmark_attrs::RepoBookmarkAttrs;
 use repo_cross_repo::ArcRepoCrossRepo;
@@ -357,6 +362,44 @@ impl RepoFactory {
         Ok(repo_blobstore)
     }
 
+    async fn repo_blobstore_unlink_ops_from_blobstore_unlink_ops(
+        &self,
+        repo_identity: &ArcRepoIdentity,
+        repo_config: &ArcRepoConfig,
+        blobstore: &Arc<dyn BlobstoreUnlinkOps>,
+        common_config: &ArcCommonConfig,
+    ) -> Result<RepoBlobstoreUnlinkOps> {
+        let mut blobstore = blobstore.clone();
+        if self.env.readonly_storage.0 {
+            blobstore = Arc::new(ReadOnlyBlobstore::new(blobstore));
+        }
+
+        let redacted_blobs = match repo_config.redaction {
+            Redaction::Enabled => {
+                let redacted_blobs = self
+                    .redacted_blobs(
+                        self.ctx(None),
+                        &repo_config.storage_config.metadata,
+                        common_config,
+                    )
+                    .await?;
+                Some(redacted_blobs)
+            }
+            Redaction::Disabled => None,
+        };
+
+        let censored_scuba_builder = self.censored_scuba_builder(common_config)?;
+
+        let repo_blobstore = RepoBlobstoreUnlinkOps::new(
+            blobstore,
+            redacted_blobs,
+            repo_identity.id(),
+            censored_scuba_builder,
+        );
+
+        Ok(repo_blobstore)
+    }
+
     async fn blobstore_enumerable_with_unlink(
         &self,
         config: &BlobConfig,
@@ -408,6 +451,26 @@ impl RepoFactory {
             .await
     }
 
+    pub async fn blobstore_unlink_ops_with_overriden_blob_config(
+        &self,
+        config: &BlobConfig,
+    ) -> Result<Arc<dyn BlobstoreUnlinkOps>> {
+        make_blobstore_unlink_ops(
+            self.env.fb,
+            config.clone(),
+            &self.env.mysql_options,
+            self.env.readonly_storage,
+            &self.env.blobstore_options,
+            &self.env.logger,
+            &self.env.config_store,
+            &self.scrub_handler,
+            self.blobstore_component_sampler.as_ref(),
+            None,
+        )
+        .watched(&self.env.logger)
+        .await
+    }
+
     pub async fn redacted_blobs(
         &self,
         ctx: CoreContext,
@@ -416,27 +479,16 @@ impl RepoFactory {
     ) -> Result<Arc<RedactedBlobs>> {
         self.redacted_blobs
             .get_or_try_init(db_config, || async move {
-                let redacted_blobs = if tunables().redaction_config_from_xdb().unwrap_or_default() {
-                    let sql_factory = self.sql_factory(db_config).await?;
-                    let redacted_content_store =
-                        sql_factory.open::<SqlRedactedContentStore>().await?;
-                    // Fetch redacted blobs in a separate task so that slow polls
-                    // in repo construction don't interfere with the SQL query.
-                    tokio::task::spawn(async move {
-                        redacted_content_store.get_all_redacted_blobs().await
-                    })
-                    .await??
-                } else {
-                    let blobstore = self.redaction_config_blobstore(common_config).await?;
+                let blobstore = self.redaction_config_blobstore(common_config).await?;
+                Ok(Arc::new(
                     RedactedBlobs::from_configerator(
                         &self.env.config_store,
                         &common_config.redaction_config.redaction_sets_location,
                         ctx,
                         blobstore,
                     )
-                    .await?
-                };
-                Ok(Arc::new(redacted_blobs))
+                    .await?,
+                ))
             })
             .await
     }
@@ -569,6 +621,9 @@ pub enum RepoFactoryError {
 
     #[error("Error opening bonsai-tag mapping")]
     BonsaiTagMapping,
+
+    #[error("Error opening git-symbolic-refs")]
+    GitSymbolicRefs,
 
     #[error("Error opening pushrebase mutation mapping")]
     PushrebaseMutationMapping,
@@ -838,6 +893,20 @@ impl RepoFactory {
         Ok(Arc::new(bonsai_tag_mapping))
     }
 
+    pub async fn git_symbolic_refs(
+        &self,
+        repo_config: &ArcRepoConfig,
+        repo_identity: &ArcRepoIdentity,
+    ) -> Result<ArcGitSymbolicRefs> {
+        let git_symbolic_refs = self
+            .open_sql::<SqlGitSymbolicRefsBuilder>(repo_config)
+            .await
+            .context(RepoFactoryError::GitSymbolicRefs)?
+            .build(repo_identity.id());
+        // Caching is not enabled for now, but can be added later if required.
+        Ok(Arc::new(git_symbolic_refs))
+    }
+
     pub async fn pushrebase_mutation_mapping(
         &self,
         repo_config: &ArcRepoConfig,
@@ -993,6 +1062,7 @@ impl RepoFactory {
         changesets: &ArcChangesets,
         commit_graph: &ArcCommitGraph,
         bonsai_hg_mapping: &ArcBonsaiHgMapping,
+        bonsai_git_mapping: &ArcBonsaiGitMapping,
         filenodes: &ArcFilenodes,
         repo_blobstore: &ArcRepoBlobstore,
     ) -> Result<ArcRepoDerivedData> {
@@ -1011,6 +1081,7 @@ impl RepoFactory {
             changesets.clone(),
             commit_graph.clone(),
             bonsai_hg_mapping.clone(),
+            bonsai_git_mapping.clone(),
             filenodes.clone(),
             repo_blobstore.as_ref().clone(),
             lease,
@@ -1031,6 +1102,26 @@ impl RepoFactory {
             .await?;
         Ok(Arc::new(
             self.repo_blobstore_from_blobstore(
+                repo_identity,
+                repo_config,
+                &blobstore,
+                common_config,
+            )
+            .await?,
+        ))
+    }
+
+    pub async fn repo_blobstore_unlink_ops(
+        &self,
+        repo_identity: &ArcRepoIdentity,
+        repo_config: &ArcRepoConfig,
+        common_config: &ArcCommonConfig,
+    ) -> Result<ArcRepoBlobstoreUnlinkOps> {
+        let blobstore = self
+            .blobstore_unlink_ops_with_overriden_blob_config(&repo_config.storage_config.blobstore)
+            .await?;
+        Ok(Arc::new(
+            self.repo_blobstore_unlink_ops_from_blobstore_unlink_ops(
                 repo_identity,
                 repo_config,
                 &blobstore,
@@ -1109,6 +1200,7 @@ impl RepoFactory {
         changesets: &ArcChangesets,
         commit_graph: &ArcCommitGraph,
         bonsai_hg_mapping: &ArcBonsaiHgMapping,
+        bonsai_git_mapping: &ArcBonsaiGitMapping,
         filenodes: &ArcFilenodes,
         repo_blobstore: &ArcRepoBlobstore,
     ) -> Result<ArcDerivedDataManagerSet> {
@@ -1129,6 +1221,7 @@ impl RepoFactory {
             changesets.clone(),
             commit_graph.clone(),
             bonsai_hg_mapping.clone(),
+            bonsai_git_mapping.clone(),
             filenodes.clone(),
             repo_blobstore.as_ref().clone(),
             lease,

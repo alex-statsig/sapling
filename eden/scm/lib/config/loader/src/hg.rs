@@ -30,12 +30,13 @@ use hgplain;
 use identity::Identity;
 use minibytes::Text;
 use url::Url;
-use util::path::expand_path;
 
 use crate::config::ConfigSet;
 use crate::config::Options;
 use crate::error::Error;
 use crate::error::Errors;
+#[cfg(feature = "fb")]
+use crate::fb::FbConfigMode;
 
 pub trait OptionsHgExt {
     /// Drop configs according to `$HGPLAIN` and `$HGPLAINEXCEPT`.
@@ -319,7 +320,7 @@ impl ConfigSetHgExt for ConfigSet {
 
         // This is the out-of-orderness. We load the dynamic config on a
         // detached ConfigSet then combine it into our "secondary" config
-        // sources to maintian the correct priority.
+        // sources to maintain the correct priority.
         errors.append(
             &mut dynamic
                 .load_dynamic(
@@ -354,21 +355,9 @@ impl ConfigSetHgExt for ConfigSet {
         let opts = opts.source("system").process_hgplain();
         let mut errors = Vec::new();
 
-        // If $HGRCPATH is set, use it instead.
-        if let Some(Ok(rcpath)) = ident.env_var("CONFIG") {
-            #[cfg(unix)]
-            let paths = rcpath.split(':');
-            #[cfg(windows)]
-            let paths = rcpath.split(';');
-            for path in paths {
-                errors.append(&mut self.load_path(expand_path(path), &opts));
-            }
-        } else {
-            for system_path in all_existing_system_paths(ident) {
-                if system_path.exists() {
-                    errors.append(&mut self.load_path(system_path, &opts));
-                    break;
-                }
+        for system_path in ident.system_config_paths() {
+            if system_path.exists() {
+                errors.append(&mut self.load_path(system_path, &opts));
             }
         }
 
@@ -392,6 +381,13 @@ impl ConfigSetHgExt for ConfigSet {
         use crate::fb::dynamicconfig::vpnless_config_path;
 
         let mut errors = Vec::new();
+        let mode = FbConfigMode::from_identity(identity);
+
+        tracing::debug!("FbConfigMode is {:?}", &mode);
+
+        if !mode.need_dynamic_generator() {
+            return Ok(errors);
+        }
 
         // Compute path
         let dynamic_path = get_config_dir(repo_path)?.join("hgrc.dynamic");
@@ -441,8 +437,14 @@ impl ConfigSetHgExt for ConfigSet {
             };
 
             // Regen inline
-            let res =
-                generate_dynamicconfig(repo_path, repo_name, None, user_name, proxy_sock_path);
+            let res = generate_dynamicconfig(
+                mode,
+                repo_path,
+                repo_name,
+                None,
+                user_name,
+                proxy_sock_path,
+            );
             if let Err(e) = res {
                 let is_perm_error = e
                     .chain()
@@ -542,15 +544,8 @@ impl ConfigSetHgExt for ConfigSet {
     }
 
     fn load_user(&mut self, opts: Options, ident: &Identity) -> Vec<Error> {
-        // If scripting config env var is set, don't load user configs
-        if identity::env_var("CONFIG").is_none() {
-            if let Some(path) = all_existing_user_paths(ident).next() {
-                return self.load_user_internal(Some(&path), opts);
-            }
-        }
-
-        // Call with empty paths for side effects.
-        self.load_user_internal(None, opts)
+        let path = ident.user_config_path();
+        self.load_user_internal(path.as_ref(), opts)
     }
 
     fn load_repo(&mut self, repo_path: &Path, opts: Options, identity: &Identity) -> Vec<Error> {
@@ -845,6 +840,7 @@ fn get_config_dir(repo_path: Option<&Path>) -> Result<PathBuf, Error> {
 
 #[cfg(feature = "fb")]
 pub fn calculate_dynamicconfig(
+    mode: FbConfigMode,
     config_dir: PathBuf,
     repo_name: Option<impl AsRef<str>>,
     canary: Option<String>,
@@ -852,11 +848,12 @@ pub fn calculate_dynamicconfig(
     proxy_sock_path: Option<String>,
 ) -> Result<ConfigSet> {
     use crate::fb::dynamicconfig::Generator;
-    Generator::new(repo_name, config_dir, user_name, proxy_sock_path)?.execute(canary)
+    Generator::new(mode, repo_name, config_dir, user_name, proxy_sock_path)?.execute(canary)
 }
 
 #[cfg(feature = "fb")]
 pub fn generate_dynamicconfig(
+    mode: FbConfigMode,
     repo_path: Option<&Path>,
     repo_name: Option<impl AsRef<str>>,
     canary: Option<String>,
@@ -907,6 +904,7 @@ pub fn generate_dynamicconfig(
     let global_config_dir = get_config_dir(None)?;
 
     let config = calculate_dynamicconfig(
+        mode,
         global_config_dir,
         repo_name,
         canary,
@@ -948,29 +946,6 @@ pub fn read_repo_name_from_disk(shared_dot_hg_path: &Path) -> io::Result<String>
     } else {
         Ok(name)
     }
-}
-
-pub fn all_existing_system_paths<'a>(id: &'a Identity) -> impl Iterator<Item = PathBuf> + 'a {
-    Some(id)
-        .into_iter()
-        .chain(identity::all())
-        .filter_map(|id| id.system_config_path().filter(|p| p.exists()))
-}
-
-pub fn all_existing_user_paths<'a>(id: &'a Identity) -> impl Iterator<Item = PathBuf> + 'a {
-    Some(id)
-        .into_iter()
-        .chain(identity::all())
-        .flat_map(|id| id.user_config_paths().into_iter().filter(|p| p.exists()))
-}
-
-pub fn default_user_config_path() -> Result<PathBuf> {
-    let id = identity::default();
-    let res = all_existing_user_paths(&id)
-        .chain(id.user_config_paths().into_iter())
-        .next()
-        .with_context(|| "unable to determine user config location")?;
-    Ok(res)
 }
 
 #[cfg(test)]
@@ -1103,17 +1078,17 @@ mod tests {
         write_file(dir.path().join("1.rc"), "[x]\na=1");
         write_file(dir.path().join("2.rc"), "[y]\nb=2");
 
-        #[cfg(unix)]
-        let hgrcpath = "$T/1.rc:$T/2.rc";
-        #[cfg(windows)]
-        let hgrcpath = "$T/1.rc;%T%/2.rc";
-
         env.set("EDITOR", None);
         env.set("VISUAL", None);
         env.set("HGPROF", None);
 
-        env.set("T", Some(dir.path().to_str().unwrap()));
-        env.set(*CONFIG_ENV_VAR, Some(hgrcpath));
+        let hgrcpath = format!(
+            "{}{}{}",
+            dir.path().join("1.rc").display(),
+            if cfg!(windows) { ';' } else { ':' },
+            dir.path().join("2.rc").display()
+        );
+        env.set(*CONFIG_ENV_VAR, Some(&hgrcpath));
 
         let mut cfg = ConfigSet::new();
 
@@ -1121,7 +1096,7 @@ mod tests {
         cfg.load_user(Options::new(), &identity);
         assert!(
             cfg.sections().is_empty(),
-            "sections {:?} is not empty",
+            "sections {:?} should be empty",
             cfg.sections()
         );
 

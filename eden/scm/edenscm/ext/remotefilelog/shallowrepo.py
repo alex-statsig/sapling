@@ -50,7 +50,7 @@ def wraprepo(repo) -> None:
             this is a sparse repository, or returns None if this is not a
             sparse repository.
             """
-            if util.safehasattr(self, "sparsematch"):
+            if hasattr(self, "sparsematch"):
                 return self.sparsematch(*revs, **kwargs)
 
             return None
@@ -158,7 +158,7 @@ def wraprepo(repo) -> None:
 
             if files:
                 results = [(path, hex(fnode)) for (path, fnode) in files]
-                self.fileservice.prefetch(results)
+                self.fileservice.prefetch(results, fetchhistory=False)
 
     repo.__class__ = shallowrepository
 

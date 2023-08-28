@@ -1,5 +1,13 @@
 #debugruntest-compatible
 
+#testcases pythonmatcher rustmatcher
+
+#if pythonmatcher
+  $ setconfig experimental.rustmatcher=false
+#else
+  $ setconfig experimental.rustmatcher=true
+#endif
+
   $ setconfig devel.segmented-changelog-rev-compat=true
   $ eagerepo
   $ fileset() {
@@ -53,6 +61,7 @@ Test operators and basic patterns
   $ fileset 'a* - a1'
   a2
   $ fileset 'a_b'
+  warning: fileset evaluated to zero files (?)
   $ fileset '"\xy"'
   hg: parse error: invalid \x escape at position 0
   [255]
@@ -125,6 +134,7 @@ Test files properties
 
   >>> _ = open('bin', 'wb').write(b'\0a')
   $ fileset 'binary()'
+  warning: fileset evaluated to zero files (?)
   $ fileset 'binary() and unknown()'
   bin
   $ echo 'bin' >> .gitignore
@@ -187,7 +197,9 @@ Test files properties
   $ fileset '(1k or 2k) and size(".5KB - 1.5kB")'
   1k
   $ fileset 'size("1M")'
+  warning: fileset evaluated to zero files (?)
   $ fileset 'size("1 GB")'
+  warning: fileset evaluated to zero files (?)
 
 Test merge states
 
@@ -197,7 +209,9 @@ Test merge states
   $ echo c >> b2
   $ hg ci -m diverging b2
   $ fileset 'resolved()'
+  warning: fileset evaluated to zero files (?)
   $ fileset 'unresolved()'
+  warning: fileset evaluated to zero files (?)
   $ hg merge
   merging b2
   warning: 1 conflicts while merging b2! (edit, then use 'hg resolve --mark')
@@ -205,6 +219,7 @@ Test merge states
   use 'hg resolve' to retry unresolved file merges or 'hg goto -C .' to abandon
   [1]
   $ fileset 'resolved()'
+  warning: fileset evaluated to zero files (?)
   $ fileset 'unresolved()'
   b2
   $ echo e > b2
@@ -213,6 +228,7 @@ Test merge states
   $ fileset 'resolved()'
   b2
   $ fileset 'unresolved()'
+  warning: fileset evaluated to zero files (?)
   $ hg ci -m merge
 
 There was a commit from subrepo here. Now subrepos are gone, insert a dummy commit to take its place.
@@ -241,8 +257,11 @@ Test with a revision
   $ fileset -r1 'removed()'
   a2
   $ fileset -r1 'deleted()'
+  warning: fileset evaluated to zero files (?)
   $ fileset -r1 'unknown()'
+  warning: fileset evaluated to zero files (?)
   $ fileset -r1 'ignored()'
+  warning: fileset evaluated to zero files (?)
   $ fileset -r1 'gitignore()'
   b2
   bin
@@ -251,7 +270,9 @@ Test with a revision
   $ fileset -r1 'size(1k)'
   1k
   $ fileset -r3 'resolved()'
+  warning: fileset evaluated to zero files (?)
   $ fileset -r3 'unresolved()'
+  warning: fileset evaluated to zero files (?)
 
 #if execbit
   $ fileset -r1 'exec()'
@@ -324,7 +345,7 @@ Test detection of unintentional 'matchctx.existing()' invocation
   > EOF
 
   $ fileset 'existingcaller()' 2>&1 | tail -1
-  AssertionError: unexpected existing() invocation
+  edenscm.error.ProgrammingError: unexpected existing() invocation
 
 Test 'revs(...)'
 ================
@@ -366,7 +387,7 @@ small reminder of the repository state
   M b2
   A 1k
   A 2k
-  A b2link (no-windows !)
+  A b2link (symlink !)
   A bin
   A c1
   A con.xml (no-windows !)
@@ -377,7 +398,7 @@ small reminder of the repository state
   M b2
   A 1k
   A 2k
-  A b2link (no-windows !)
+  A b2link (symlink !)
   A bin
   A c1
   A con.xml (no-windows !)
@@ -421,11 +442,13 @@ Test that "revs()" work for file missing in the working copy/current context
 (none of the file exist in "0")
 
   $ fileset -r 0 "revs('4', added())"
+  warning: fileset evaluated to zero files (?)
 
 Call with empty revset
 --------------------------
 
   $ fileset "revs('2-2', modified())"
+  warning: fileset evaluated to zero files (?)
 
 Call with revset matching multiple revs
 ---------------------------------------
@@ -448,6 +471,7 @@ Simple case
 -----------
 
   $ fileset "status(3, 4, added())"
+  warning: fileset evaluated to zero files (?)
 
 use rev to restrict matched file
 -----------------------------------------
@@ -457,10 +481,13 @@ use rev to restrict matched file
   $ fileset "status(0, 1, removed())"
   a2
   $ fileset "* and status(0, 1, removed())"
+  warning: fileset evaluated to zero files (?)
   $ fileset -r 4 "status(0, 1, removed())"
   a2
   $ fileset -r 4 "* and status(0, 1, removed())"
+  warning: fileset evaluated to zero files (?)
   $ fileset "revs('4', * and status(0, 1, removed()))"
+  warning: fileset evaluated to zero files (?)
   $ fileset "revs('0', * and status(0, 1, removed()))"
   a2
 
@@ -471,6 +498,7 @@ check wdir()
   R con.xml (no-windows !)
   $ fileset "status(4, 'wdir()', removed())"
   con.xml (no-windows !)
+  warning: fileset evaluated to zero files (?)
 
   $ hg status --removed --rev 'desc(diverging)'
   R a2
@@ -500,14 +528,14 @@ test with multi revs revset
   $ hg status --added --rev 'desc(addfiles)':'desc(manychanges)' --rev 'desc(merge)':'desc(subrepo)'
   A 1k
   A 2k
-  A b2link (no-windows !)
+  A b2link (symlink !)
   A bin
   A c1
   A con.xml (no-windows !)
   $ fileset "status('0:1', '3:4', added())"
   1k
   2k
-  b2link (no-windows !)
+  b2link (symlink !)
   bin
   c1
   con.xml (no-windows !)

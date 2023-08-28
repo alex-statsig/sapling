@@ -6,6 +6,7 @@
  */
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::fs::metadata;
 use std::fs::File;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::bail;
+use anyhow::format_err;
 use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
@@ -32,8 +34,9 @@ use mononoke_types::RepositoryId;
 use regex::Regex;
 use serde_json::json;
 
-use crate::commands::blobstore_unlink::get_blobstores;
+use crate::commands::blobstore_unlink::get_blobconfig;
 
+/// Unlink large numbers of blobstore keys
 #[derive(Parser)]
 pub struct CommandArgs {
     /// The directory that contains all the key files
@@ -51,17 +54,19 @@ pub struct CommandArgs {
     /// The file, we're going to log the error into
     #[arg(short, long)]
     error_log_file: String,
+
+    /// The file, we're going to track which key file has been processed
+    #[arg(short, long)]
+    progress_track_file: String,
 }
 
-fn create_error_log_file(error_log_file_path: String) -> File {
-    let path = std::path::Path::new(&error_log_file_path);
-    let prefix = path.parent().unwrap();
-    std::fs::create_dir_all(prefix).unwrap();
+fn create_or_open_file(error_log_file_path: String, read_before_write: bool) -> File {
     let file = OpenOptions::new()
         .create(true)
+        .read(read_before_write)
         .write(true)
         .append(true)
-        .open(&error_log_file_path)
+        .open(error_log_file_path)
         .unwrap();
     file
 }
@@ -72,8 +77,10 @@ struct BlobstoreBulkUnlinker {
     keys_dir: String,
     dry_run: bool,
     sanitise_regex: String,
-    repo_to_blobstores: HashMap<RepositoryId, Vec<Arc<dyn BlobstoreUnlinkOps>>>,
+    repo_to_blobstore: HashMap<RepositoryId, Arc<dyn BlobstoreUnlinkOps>>,
     error_log_file: File,
+    progress_track_file: File,
+    already_processed_files: HashSet<String>,
 }
 
 impl BlobstoreBulkUnlinker {
@@ -83,14 +90,17 @@ impl BlobstoreBulkUnlinker {
         dry_run: bool,
         sanitise_regex: String,
         error_log_file_path: String,
+        progress_track_path: String,
     ) -> BlobstoreBulkUnlinker {
         BlobstoreBulkUnlinker {
             app,
             keys_dir,
             dry_run,
             sanitise_regex,
-            repo_to_blobstores: HashMap::new(),
-            error_log_file: create_error_log_file(error_log_file_path),
+            repo_to_blobstore: HashMap::new(),
+            error_log_file: create_or_open_file(error_log_file_path, false),
+            progress_track_file: create_or_open_file(progress_track_path, true),
+            already_processed_files: HashSet::new(),
         }
     }
 
@@ -120,34 +130,30 @@ impl BlobstoreBulkUnlinker {
         Ok(blobstore_key.to_string())
     }
 
-    async fn get_blobstores_from_repo_id(
+    async fn get_blobstore_from_repo_id(
         &mut self,
         repo_id: RepositoryId,
-    ) -> Result<&Vec<Arc<dyn BlobstoreUnlinkOps>>> {
+    ) -> Result<&dyn BlobstoreUnlinkOps> {
         use std::collections::hash_map::Entry::Vacant;
-        if let Vacant(e) = self.repo_to_blobstores.entry(repo_id) {
+        if let Vacant(e) = self.repo_to_blobstore.entry(repo_id) {
             let (_repo_name, repo_config) = self.app.repo_config(&RepoArg::Id(repo_id))?;
-            let blobstores = get_blobstores(
-                self.app.fb,
-                repo_config.storage_config,
-                None,
-                self.app.environment().readonly_storage,
-                &self.app.environment().blobstore_options,
-                self.app.config_store(),
-            )
-            .await?;
-
-            e.insert(blobstores);
+            let blob_config = get_blobconfig(repo_config.storage_config.blobstore, None)?;
+            let blobstore = self
+                .app
+                .open_blobstore_unlink_ops_with_overriden_blob_config(&blob_config)
+                .await?;
+            e.insert(blobstore);
         }
-        return Ok(self.repo_to_blobstores.get(&repo_id).unwrap());
+        return Ok(self.repo_to_blobstore.get(&repo_id).unwrap());
     }
 
     fn sanitise_check(&self, key: &str) -> Result<()> {
         let re = Regex::new(&self.sanitise_regex).unwrap();
         if !re.is_match(key) {
-            panic!(
+            bail!(
                 "Key {} does not match the sanitise checking regex {}",
-                key, &self.sanitise_regex
+                key,
+                &self.sanitise_regex
             );
         }
         Ok(())
@@ -161,40 +167,32 @@ impl BlobstoreBulkUnlinker {
             self.extract_blobstore_key_from(key),
         ) {
             // do a sanitising check before we start deleting
-            self.sanitise_check(&blobstore_key).unwrap();
+            self.sanitise_check(&blobstore_key)?;
 
             if self.dry_run {
                 println!("\tUnlink key: {}", key);
                 return Ok(());
             }
 
-            if let Ok(blobstores) = self.get_blobstores_from_repo_id(repo_id).await {
-                let mut num_errors = 0;
-                let num_blobstores = blobstores.len();
-                for blobstore in blobstores {
-                    match blobstore.unlink(&context, &blobstore_key).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            num_errors += 1;
-                            let error_msg = e.to_string();
-                            if !error_msg.contains("does not exist in the blobstore")
-                                && !error_msg.contains("[404] Path not found")
-                            {
-                                bail!(
-                                    "Failed to unlink key {} in one underlying blobstore, error: {}.",
-                                    blobstore_key,
-                                    error_msg
-                                );
-                            }
-                        }
+            if let Ok(blobstore) = self.get_blobstore_from_repo_id(repo_id).await {
+                // Note that the implementation of unlink on a multiplexed blobstore won't fail if
+                // the key is already absent.
+                let result = blobstore.unlink(&context, &blobstore_key).await;
+                if let Err(err) = result {
+                    let error_msg = err.to_string();
+                    if error_msg.contains("does not exist in the blobstore")
+                        || error_msg.contains("[404] Path not found")
+                    {
+                        // If the blobstore is not multiplexed, unlink can fail because the key is
+                        // not already present.
+                        // If that's the case, we don't want to fail as we're already in the
+                        // desired state.
+                        // Instead, log the error to a file and continue.
+                        self.log_error_to_file(key, "no blobstore contains this key.")
+                            .await?;
+                    } else {
+                        bail!(err.context(format!("Failed to unlink key {}", blobstore_key)));
                     }
-                }
-                // When we see this error, we want to log this into a file. We don't want to crash
-                // here because the program can be running with after a retry, and some keys have
-                // already been deleted.
-                if num_errors == num_blobstores {
-                    self.log_error_to_file(key, "no blobstore contains this key.")
-                        .await;
                 }
             } else {
                 // We log this error into a file. so that we can tackle them later together.
@@ -202,22 +200,32 @@ impl BlobstoreBulkUnlinker {
                     key,
                     "Skip key because its repo id is not found in the given repo config.",
                 )
-                .await;
+                .await?;
             }
         } else {
             self.log_error_to_file(key, "Skip key because it is invalid.")
-                .await;
+                .await?;
         }
 
         Ok(())
     }
 
-    async fn log_error_to_file(&self, key: &str, msg: &str) {
+    async fn log_error_to_file(&self, key: &str, msg: &str) -> Result<()> {
         let error_record = json!({
             "key": key,
             "message": msg
         });
-        writeln!(&self.error_log_file, "{}", error_record.to_string());
+        writeln!(&self.error_log_file, "{}", error_record)
+            .with_context(|| format_err!("Error while writing to file {:?}", self.error_log_file))
+    }
+
+    async fn log_processed_file(&self, path: &str) -> Result<()> {
+        writeln!(&self.progress_track_file, "{}", path).with_context(|| {
+            format_err!(
+                "Error while recording progress to file {:?}",
+                self.progress_track_file
+            )
+        })
     }
 
     async fn bulk_unlink_keys_in_file(
@@ -257,14 +265,32 @@ impl BlobstoreBulkUnlinker {
     }
 
     async fn start_unlink(&mut self) -> Result<()> {
+        let lines = io::BufReader::new(&self.progress_track_file).lines();
+        for line in lines {
+            if let Ok(key_file_path) = line {
+                self.already_processed_files
+                    .insert(key_file_path.to_string());
+            }
+        }
+
         let entries = fs::read_dir(self.keys_dir.clone())?
             .map(|res| res.map(|e| e.path()))
             .collect::<Result<Vec<_>, io::Error>>()?;
 
         let total_file_count = entries.len();
         for (cur, entry) in entries.iter().enumerate() {
+            let path_to_record = entry.display().to_string();
+            if self.already_processed_files.contains(&path_to_record) {
+                println!("File {} has already been processed, skip.", entry.display());
+                println!(
+                    "Progress: {:.3}%\tprocessing took 0 seconds.",
+                    (cur + 1) as f32 * 100.0 / total_file_count as f32
+                );
+                continue;
+            }
             self.bulk_unlink_keys_in_file(entry, cur, total_file_count)
                 .await?;
+            self.log_processed_file(&path_to_record).await?;
         }
         Ok(())
     }
@@ -275,6 +301,7 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
     let dry_run = args.dry_run;
     let sanitise_regex = args.sanitise_regex;
     let error_log_file = args.error_log_file;
+    let progress_track_file = args.progress_track_file;
 
     if dry_run {
         println!(
@@ -288,6 +315,7 @@ pub async fn run(app: MononokeApp, args: CommandArgs) -> Result<()> {
         dry_run,
         sanitise_regex,
         error_log_file,
+        progress_track_file,
     );
     unlinker.start_unlink().await?;
 

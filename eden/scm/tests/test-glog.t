@@ -78,7 +78,6 @@
 
   $ setconfig format.use-segmented-changelog=true
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig workingcopy.ruststatus=false
   $ commit() {
   >   rev=$1
   >   msg=$2
@@ -1420,22 +1419,22 @@
 # Test "set:..." and parent revision
 
   $ hg up -q 4
-  $ hg log -G --print-revset 'set:copied()'
+  $ hg log -G --print-revset 'set:clean()'
   []
   (func
     (symbol '_matchfiles')
     (list
       (string 'r:')
       (string 'd:relpath')
-      (string 'p:set:copied()')))
-  $ hg log -G --print-revset --include 'set:copied()'
+      (string 'p:set:clean()')))
+  $ hg log -G --print-revset --include 'set:clean()'
   []
   (func
     (symbol '_matchfiles')
     (list
       (string 'r:')
       (string 'd:relpath')
-      (string 'i:set:copied()')))
+      (string 'i:set:clean()')))
   $ hg log -G --print-revset -r 'sort(file('\''set:copied()'\''), -rev)'
   ["sort(file('set:copied()'), -rev)"]
   []

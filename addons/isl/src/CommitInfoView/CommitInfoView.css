@@ -84,6 +84,7 @@
   transition: background-color 0.1s;
   border-radius: var(--pad);
   padding: var(--pad);
+  word-break: break-word;
 }
 
 .commit-info-section .see-more-container {
@@ -142,6 +143,10 @@
   margin-top: calc(-1 * var(--toolbar-fade-height));
   opacity: 0.8;
   pointer-events: none;
+}
+
+.commit-info-view-multi-commit .commit-list .commit-details:before {
+  display: none;
 }
 
 .hover-edit-button {
@@ -270,16 +275,20 @@
   height: var(--token-height);
 }
 
-.commit-info-tokenized-field .token {
+.commit-info-tokenized-field .token,
+.suggested-reviewers .token {
   padding: 0;
   background-color: var(--tooltip-background);
-  padding-left: var(--pad);
-  padding-right: 1px;
+  padding: 0 var(--pad);
   border: 1px solid var(--tooltip-border);
   display: flex;
   align-items: center;
   gap: var(--halfpad);
   min-height: calc(var(--token-height) - 2px);
+}
+
+.commit-info-tokenized-field .token vscode-button {
+  margin-right: calc(-1 * var(--pad));
 }
 
 .commit-info-tokenized-field .typeahead-suggestions {
@@ -385,4 +394,8 @@
   align-items: center;
   font-size: 120%;
   background-color: rgba(0, 0, 0, 0.1);
+}
+
+.commit-info-view-main-content > .tooltip-creator {
+  width: 100%;
 }

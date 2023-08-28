@@ -18,6 +18,7 @@ manifest-tree = { version = "0.1.0", path = "../manifest-tree" }
 parking_lot = { version = "0.12.1", features = ["send_guard"] }
 pathhistory = { version = "0.1.0", path = "../pathhistory" }
 pathmatcher = { version = "0.1.0", path = "../pathmatcher" }
+serde = { version = "1.0.185", features = ["derive", "rc"] }
 storemodel = { version = "0.1.0", path = "../storemodel" }
 thiserror = "1.0.43"
 tracing = "0.1.35"
@@ -26,5 +27,5 @@ xdiff = { version = "0.1.0", path = "../xdiff" }
 
 [dev-dependencies]
 manifest-tree = { version = "0.1.0", path = "../manifest-tree", features = ["for-tests"] }
-tokio = { version = "1.25.0", features = ["full", "test-util", "tracing"] }
+tokio = { version = "1.29.1", features = ["full", "test-util", "tracing"] }
 tracing-test = "0.2.3"

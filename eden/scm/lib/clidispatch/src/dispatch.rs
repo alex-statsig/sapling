@@ -17,15 +17,18 @@ use cliparser::parser::ParseOptions;
 use cliparser::parser::ParseOutput;
 use cliparser::parser::StructFlags;
 use configloader::config::ConfigSet;
+use configmodel::convert::ByteCount;
 use configmodel::Config;
 use configmodel::ConfigExt;
 use repo::repo::Repo;
 
+use crate::abort_if;
 use crate::command::CommandDefinition;
 use crate::command::CommandFunc;
 use crate::command::CommandTable;
 use crate::errors;
 use crate::errors::UnknownCommand;
+use crate::fallback;
 use crate::global_flags::HgGlobalOpts;
 use crate::io::IO;
 use crate::OptionalRepo;
@@ -90,14 +93,49 @@ fn add_global_flag_derived_configs(repo: &mut OptionalRepo, global_opts: HgGloba
     }
 }
 
-fn last_chance_to_abort(opts: &HgGlobalOpts) -> Result<()> {
-    if opts.profile {
-        return Err(errors::Abort("--profile does not support Rust commands (yet)".into()).into());
+fn last_chance_to_abort(early: &HgGlobalOpts, full: &HgGlobalOpts) -> Result<()> {
+    abort_if!(
+        full.profile,
+        "--profile does not support Rust commands (yet)"
+    );
+
+    if full.help {
+        fallback!("--help option requested");
     }
 
-    if opts.help {
-        return Err(errors::FallbackToPython("--help option requested".to_owned()).into());
-    }
+    // These are security sensitive options, so perform extra checks.
+    //
+    // "early" was parsed disallowing arbitrary prefix matching (e.g.
+    // "--configfi" won't expand to "--configfile"), so simply comparing the
+    // early and full args can detect abbreviations.
+    //
+    // These comparisons also check for the sensitive options being included in
+    // command aliases since aliases have not been expanded for the "early"
+    // parse.
+    abort_if!(
+        early.config != full.config,
+        "option --config may not be abbreviated or used in aliases",
+    );
+
+    abort_if!(
+        early.configfile != full.configfile,
+        "option --configfile may not be abbreviated or used in aliases",
+    );
+
+    abort_if!(
+        early.cwd != full.cwd,
+        "option --cwd may not be abbreviated or used in aliases",
+    );
+
+    abort_if!(
+        early.repository != full.repository,
+        "option -R must appear alone, and --repository may not be abbreviated or used in aliases",
+    );
+
+    abort_if!(
+        early.debugger != full.debugger,
+        "option --debugger may not be abbreviated or used in aliases",
+    );
 
     Ok(())
 }
@@ -166,6 +204,12 @@ fn initialize_indexedlog(config: &ConfigSet) -> Result<()> {
         config.get_opt::<u32>("storage", "indexedlog-max-index-checksum-chain-len")?
     {
         indexedlog::config::INDEX_CHECKSUM_MAX_CHAIN_LEN.store(max_chain_len, SeqCst);
+    }
+
+    if let Some(threshold) =
+        config.get_opt::<ByteCount>("storage", "indexedlog-page-out-threshold")?
+    {
+        indexedlog::config::set_page_out_threshold(threshold.value() as _);
     }
 
     let fsync: bool = config.get_or_default("storage", "indexedlog-fsync")?;
@@ -382,7 +426,7 @@ impl Dispatcher {
         let parsed = parse(def, &new_args)?;
 
         let global_opts: HgGlobalOpts = parsed.clone().try_into()?;
-        last_chance_to_abort(&global_opts)?;
+        last_chance_to_abort(&self.global_opts, &global_opts)?;
 
         initialize_blackbox(&self.optional_repo)?;
 
@@ -416,14 +460,6 @@ impl Dispatcher {
                 }
                 CommandFunc::WorkingCopy(f) => {
                     let repo = self.repo_mut()?;
-                    if !repo.config().get_or_default("workingcopy", "use-rust")? {
-                        tracing::warn!(
-                            "command requires working copy but Rust working copy is disabled"
-                        );
-                        // TODO(T131699257): Migrate all tests to use Rust
-                        // workingcopy and removed fallback to Python.
-                        return Err(errors::FallbackToPython("requested command that uses working copy but workingcopy.use-rust not set to True".to_owned()).into());
-                    }
                     let path = repo.path().to_owned();
                     let mut wc = repo.working_copy(&path)?;
                     f(parsed, io, repo, &mut wc)

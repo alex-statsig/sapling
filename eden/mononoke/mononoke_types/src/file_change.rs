@@ -6,6 +6,7 @@
  */
 
 use std::fmt;
+use std::str::FromStr;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -18,7 +19,7 @@ use quickcheck::Gen;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 
-use crate::errors::ErrorKind;
+use crate::errors::MononokeTypeError;
 use crate::path::MPath;
 use crate::thrift;
 use crate::typed_hash::ChangesetId;
@@ -123,7 +124,7 @@ impl TrackedFileChange {
         };
 
         catch_block().with_context(|| {
-            ErrorKind::InvalidThrift(
+            MononokeTypeError::InvalidThrift(
                 "FileChange".into(),
                 format!("Invalid changed entry for path {}", mpath),
             )
@@ -322,8 +323,14 @@ impl Arbitrary for FileChange {
 /// The only difference is that the Executables are created with executable permission when
 /// checked out.
 ///
-/// Symlink is also the same as Regular, but the content of the file is interpolated into a path
-/// being traversed during lookup.
+/// Symlink is also the same as Regular, but the file content is used to create a symbolic link
+/// (or equivalent) when checked out.  Mononoke never interpolates symlinks itself, as they are
+/// not guaranteed to resolve to a file in the repo, or to anything valid at all.
+///
+/// GitSubmodule represents a submodule in a git tree.  The file content contains the binary hash
+/// of the git commit that the submodule currently refers to.  Mononoke does not interpret Git
+/// submodules; they must be interpreted by the client during checkout based on local repo
+/// configuration.
 #[derive(
     Debug,
     Clone,
@@ -340,20 +347,28 @@ pub enum FileType {
     Regular,
     Executable,
     Symlink,
+    GitSubmodule,
 }
 
 impl FileType {
     /// All possible file types.
-    pub fn all() -> [FileType; 3] {
-        [FileType::Regular, FileType::Executable, FileType::Symlink]
+    pub fn all() -> [FileType; 4] {
+        [
+            FileType::Regular,
+            FileType::Executable,
+            FileType::Symlink,
+            FileType::GitSubmodule,
+        ]
     }
 
     /// All the file types that `self` is not.
-    pub fn complement(&self) -> [FileType; 2] {
+    pub fn complement(&self) -> [FileType; 3] {
+        use FileType::*;
         match self {
-            FileType::Regular => [FileType::Executable, FileType::Symlink],
-            FileType::Executable => [FileType::Regular, FileType::Symlink],
-            FileType::Symlink => [FileType::Regular, FileType::Executable],
+            Regular => [Executable, Symlink, GitSubmodule],
+            Executable => [Regular, Symlink, GitSubmodule],
+            Symlink => [Regular, Executable, GitSubmodule],
+            GitSubmodule => [Regular, Executable, Symlink],
         }
     }
 
@@ -362,7 +377,8 @@ impl FileType {
             thrift::FileType::Regular => FileType::Regular,
             thrift::FileType::Executable => FileType::Executable,
             thrift::FileType::Symlink => FileType::Symlink,
-            thrift::FileType(x) => bail!(ErrorKind::InvalidThrift(
+            thrift::FileType::GitSubmodule => FileType::GitSubmodule,
+            thrift::FileType(x) => bail!(MononokeTypeError::InvalidThrift(
                 "FileType".into(),
                 format!("unknown file type '{}'", x)
             )),
@@ -375,17 +391,21 @@ impl FileType {
             FileType::Regular => thrift::FileType::Regular,
             FileType::Executable => thrift::FileType::Executable,
             FileType::Symlink => thrift::FileType::Symlink,
+            FileType::GitSubmodule => thrift::FileType::GitSubmodule,
         }
     }
 }
 
-impl From<FileType> for EdenapiFileType {
-    fn from(v: FileType) -> Self {
+impl TryFrom<FileType> for EdenapiFileType {
+    type Error = MononokeTypeError;
+
+    fn try_from(v: FileType) -> Result<Self, Self::Error> {
         use EdenapiFileType::*;
         match v {
-            FileType::Regular => Regular,
-            FileType::Executable => Executable,
-            FileType::Symlink => Symlink,
+            FileType::Regular => Ok(Regular),
+            FileType::Executable => Ok(Executable),
+            FileType::Symlink => Ok(Symlink),
+            FileType::GitSubmodule => Err(MononokeTypeError::GitSubmoduleNotSupported),
         }
     }
 }
@@ -407,16 +427,32 @@ impl fmt::Display for FileType {
             FileType::Symlink => "symlink",
             FileType::Executable => "executable",
             FileType::Regular => "regular",
+            FileType::GitSubmodule => "git-submodule",
         };
         write!(f, "{}", s)
     }
 }
 
+impl FromStr for FileType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "regular" | "file" => Ok(FileType::Regular),
+            "executable" | "exec" => Ok(FileType::Executable),
+            "symlink" | "link" => Ok(FileType::Symlink),
+            "git-submodule" | "gitm" => Ok(FileType::GitSubmodule),
+            _ => bail!("Invalid file type: {s}"),
+        }
+    }
+}
+
 impl Arbitrary for FileType {
     fn arbitrary(g: &mut Gen) -> Self {
-        match u64::arbitrary(g) % 10 {
-            0 => FileType::Executable,
-            1 => FileType::Symlink,
+        match u64::arbitrary(g) % 100 {
+            0..=9 => FileType::Executable,
+            10..=19 => FileType::Symlink,
+            20 => FileType::GitSubmodule,
             _ => FileType::Regular,
         }
     }

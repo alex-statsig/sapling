@@ -306,12 +306,6 @@ pypats = [
         ),
         (r"^\s*(while|if) [01]:", "use True/False for constant Boolean expression"),
         (r"^\s*if False(:| +and)", "Remove code instead of using `if False`"),
-        (
-            r"(?:(?<!def)\s+|\()hasattr\(",
-            "hasattr(foo, bar) is broken on py2, use util.safehasattr(foo, bar) "
-            "instead",
-            r"#.*hasattr-py3-only",
-        ),
         (r"opener\([^)]*\).read\(", "use opener.read() instead"),
         (r"opener\([^)]*\).write\(", "use opener.write() instead"),
         (r"[ \t\(](open|file)\([^)]*\)\.read\(", "use util.readfile() instead"),
@@ -532,7 +526,7 @@ def _preparepats():
             filters[i] = re.compile(flt[0]), flt[1]
 
 
-class norepeatlogger(object):
+class norepeatlogger:
     def __init__(self):
         self._lastseen = None
 
@@ -597,7 +591,6 @@ def checkfile(
             try:
                 pre = post = fp.read()
             except UnicodeDecodeError as e:
-                print("%s while reading %s" % (e, f))
                 return result
     except IOError as e:
         print("Skipping %s, %s" % (f, str(e).split(":", 1)[0]))

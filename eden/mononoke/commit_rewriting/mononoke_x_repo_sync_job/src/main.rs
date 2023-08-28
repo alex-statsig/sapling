@@ -50,6 +50,7 @@ use anyhow::format_err;
 use anyhow::Error;
 use anyhow::Result;
 use backsyncer::format_counter as format_backsyncer_counter;
+use bonsai_git_mapping::BonsaiGitMappingArc;
 use bonsai_hg_mapping::BonsaiHgMappingArc;
 use bookmarks::BookmarkKey;
 use bookmarks::BookmarkUpdateLogRef;
@@ -131,6 +132,7 @@ pub trait Repo = cross_repo_sync::Repo
     + ChangesetsArc
     + FilenodesArc
     + BonsaiHgMappingArc
+    + BonsaiGitMappingArc
     + MutableCountersRef
     + RepoIdentityRef
     + CommitGraphRef
@@ -176,6 +178,7 @@ async fn run_in_single_commit_mode<M: SyncedCommitMapping + Clone + 'static, R: 
         &common_bookmarks,
         scuba_sample,
         pushrebase_rewrite_dates,
+        None,
     )
     .await;
 

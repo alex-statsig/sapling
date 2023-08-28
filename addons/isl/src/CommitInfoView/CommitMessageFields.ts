@@ -61,10 +61,25 @@ export function commitMessageFieldsToString(
         // stringified messages of the form Key: value, except the title or generic description don't need a label
         (config.key === 'Title' || config.key === 'Description' ? '' : config.key + ': ') +
         (config.type === 'field'
-          ? (fields[config.key] as Array<string>).join(', ')
+          ? (config.formatValues ?? joinWithComma)(fields[config.key] as Array<string>)
           : fields[config.key]),
     )
     .join('\n\n');
+}
+
+function joinWithComma(tokens: Array<string>): string {
+  return tokens.join(', ');
+}
+
+/**
+ * Look through the message fields for a diff number
+ */
+export function findEditedDiffNumber(field: CommitMessageFields): string | undefined {
+  const found = field['Differential Revision'];
+  if (Array.isArray(found)) {
+    return found[0];
+  }
+  return found;
 }
 
 function commaSeparated(s: string | undefined): Array<string> {
@@ -83,7 +98,7 @@ const SL_COMMIT_MESSAGE_REGEX = /^(HG:.*)|(SL:.*)/gm;
  */
 export function parseCommitMessageFields(
   schema: Array<FieldConfig>,
-  title: string,
+  title: string, // TODO: remove title and just pass title\ndescription in one thing
   description: string,
 ): CommitMessageFields {
   const map: Partial<Record<string, string>> = {};
@@ -121,7 +136,10 @@ export function parseCommitMessageFields(
         // or configured as part of the overall schema "parseMethod", to support formats other than "Key: Value"
         return ['Description', description];
       }
-      return [config.key, config.type === 'field' ? commaSeparated(found) : found];
+      return [
+        config.key,
+        config.type === 'field' ? (config.extractValues ?? commaSeparated)(found) : found,
+      ];
     }),
   );
   // title won't get parsed automatically, manually insert it

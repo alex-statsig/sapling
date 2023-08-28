@@ -39,6 +39,15 @@ namespace facebook::eden {
  */
 namespace {
 
+struct TreeAndId {
+  TreePtr tree;
+  ObjectId id;
+
+  static TreeAndId null() {
+    return TreeAndId{nullptr, ObjectId{}};
+  }
+};
+
 struct ChildFutures {
   void add(RelativePath&& path, ImmediateFuture<Unit>&& future) {
     paths.emplace_back(std::move(path));
@@ -64,7 +73,9 @@ void processRemovedSide(
     RelativePathPiece currentPath,
     const Tree::value_type& scmEntry) {
   context->callback->removedPath(
-      currentPath + scmEntry.first, scmEntry.second.getDtype());
+      currentPath + scmEntry.first,
+      filteredEntryDtype(
+          scmEntry.second.getDtype(), context->getWindowsSymlinksEnabled()));
   if (!scmEntry.second.isTree()) {
     return;
   }
@@ -90,6 +101,7 @@ void processAddedSide(
     bool isIgnored) {
   bool entryIgnored = isIgnored;
   auto entryPath = currentPath + wdEntry.first;
+  bool windowsSymlinksEnabled = context->getWindowsSymlinksEnabled();
   if (!isIgnored && ignore) {
     auto fileType =
         wdEntry.second.isTree() ? GitIgnore::TYPE_DIR : GitIgnore::TYPE_FILE;
@@ -103,9 +115,13 @@ void processAddedSide(
   }
 
   if (!entryIgnored) {
-    context->callback->addedPath(entryPath, wdEntry.second.getDtype());
+    context->callback->addedPath(
+        entryPath,
+        filteredEntryDtype(wdEntry.second.getDtype(), windowsSymlinksEnabled));
   } else if (context->listIgnored) {
-    context->callback->ignoredPath(entryPath, wdEntry.second.getDtype());
+    context->callback->ignoredPath(
+        entryPath,
+        filteredEntryDtype(wdEntry.second.getDtype(), windowsSymlinksEnabled));
   } else {
     // Don't bother reporting this ignored file since
     // listIgnored is false.
@@ -135,6 +151,7 @@ void processBothPresent(
   auto entryPath = currentPath + scmEntry.first;
   bool isTreeSCM = scmEntry.second.isTree();
   bool isTreeWD = wdEntry.second.isTree();
+  bool windowsSymlinksEnabled = context->getWindowsSymlinksEnabled();
 
   // If wdEntry and scmEntry are both files (or symlinks) then we don't need
   // to bother computing the ignore status: the file is explicitly tracked in
@@ -177,10 +194,16 @@ void processBothPresent(
       // Add a ADDED entry for this path and a removal of the directory
       if (entryIgnored) {
         if (context->listIgnored) {
-          context->callback->ignoredPath(entryPath, wdEntry.second.getDtype());
+          context->callback->ignoredPath(
+              entryPath,
+              filteredEntryDtype(
+                  wdEntry.second.getDtype(), windowsSymlinksEnabled));
         }
       } else {
-        context->callback->addedPath(entryPath, wdEntry.second.getDtype());
+        context->callback->addedPath(
+            entryPath,
+            filteredEntryDtype(
+                wdEntry.second.getDtype(), windowsSymlinksEnabled));
       }
 
       // Report everything in scmTree as REMOVED
@@ -193,7 +216,10 @@ void processBothPresent(
     if (isTreeWD) {
       // file-to-tree
       // Add a REMOVED entry for this path
-      context->callback->removedPath(entryPath, scmEntry.second.getDtype());
+      context->callback->removedPath(
+          entryPath,
+          filteredEntryDtype(
+              scmEntry.second.getDtype(), windowsSymlinksEnabled));
 
       // Report everything in wdEntry as ADDED
       context->callback->addedPath(entryPath, wdEntry.second.getDtype());
@@ -207,8 +233,13 @@ void processBothPresent(
       // changed and then later reverted. In that case, the contents would be
       // the same but the blobs would have different hashes
       // If the types are different, then this entry is definitely modified
-      if (scmEntry.second.getType() != wdEntry.second.getType()) {
-        context->callback->modifiedPath(entryPath, wdEntry.second.getDtype());
+      if (filteredEntryType(
+              scmEntry.second.getType(), windowsSymlinksEnabled) !=
+          filteredEntryType(wdEntry.second.getType(), windowsSymlinksEnabled)) {
+        context->callback->modifiedPath(
+            entryPath,
+            filteredEntryDtype(
+                wdEntry.second.getDtype(), windowsSymlinksEnabled));
       } else {
         auto compareEntryContents =
             context->store
@@ -218,7 +249,9 @@ void processBothPresent(
                     context->getFetchContext())
                 .thenValue([entryPath = entryPath.copy(),
                             context,
-                            dtype = scmEntry.second.getDtype()](bool equal) {
+                            dtype = filteredEntryDtype(
+                                scmEntry.second.getDtype(),
+                                windowsSymlinksEnabled)](bool equal) {
                   if (!equal) {
                     context->callback->modifiedPath(entryPath, dtype);
                   }
@@ -259,8 +292,8 @@ FOLLY_NODISCARD ImmediateFuture<Unit> waitOnResults(
 FOLLY_NODISCARD ImmediateFuture<Unit> computeTreeDiff(
     DiffContext* context,
     RelativePathPiece currentPath,
-    std::shared_ptr<const Tree> scmTree,
-    std::shared_ptr<const Tree> wdTree,
+    TreePtr scmTree,
+    TreePtr wdTree,
     std::unique_ptr<GitIgnoreStack> ignore,
     bool isIgnored) {
   // A list of Futures to wait on for our children's results.
@@ -361,8 +394,8 @@ ImmediateFuture<std::string> loadGitIgnore(
 FOLLY_NODISCARD ImmediateFuture<Unit> diffTrees(
     DiffContext* context,
     RelativePathPiece currentPath,
-    std::shared_ptr<const Tree> scmTree,
-    std::shared_ptr<const Tree> wdTree,
+    TreePtr scmTree,
+    TreePtr wdTree,
     const GitIgnoreStack* parentIgnore,
     bool isIgnored) {
   if (context->isCancelled()) {
@@ -420,8 +453,8 @@ FOLLY_NODISCARD ImmediateFuture<Unit> diffTrees(
 FOLLY_NODISCARD ImmediateFuture<Unit> diffTrees(
     DiffContext* context,
     RelativePathPiece currentPath,
-    ImmediateFuture<std::shared_ptr<const Tree>> scmFuture,
-    ImmediateFuture<std::shared_ptr<const Tree>> wdFuture,
+    ImmediateFuture<TreeAndId> scmFuture,
+    ImmediateFuture<TreeAndId> wdFuture,
     const GitIgnoreStack* ignore,
     bool isIgnored) {
   auto treesFuture = collectAllSafe(std::move(scmFuture), std::move(wdFuture));
@@ -436,9 +469,7 @@ FOLLY_NODISCARD ImmediateFuture<Unit> diffTrees(
            copiedCurrentPath = std::move(copiedCurrentPath),
            currentPath,
            ignore,
-           isIgnored](std::tuple<
-                      std::shared_ptr<const Tree>,
-                      std::shared_ptr<const Tree>> tup)
+           isIgnored](std::tuple<TreeAndId, TreeAndId> tup)
               -> ImmediateFuture<folly::Unit> {
             auto [scmTree, wdTree] = std::move(tup);
 
@@ -446,9 +477,9 @@ FOLLY_NODISCARD ImmediateFuture<Unit> diffTrees(
             // This happens in the case in which the CLI (during eden doctor)
             // calls getScmStatusBetweenRevisions() with the same hash in
             // order to check if a commit hash is valid.
-            if (scmTree && wdTree &&
+            if (scmTree.tree && wdTree.tree &&
                 context->store->areObjectsKnownIdentical(
-                    scmTree->getHash(), wdTree->getHash())) {
+                    scmTree.id, wdTree.id)) {
               return folly::unit;
             }
 
@@ -458,11 +489,18 @@ FOLLY_NODISCARD ImmediateFuture<Unit> diffTrees(
             return diffTrees(
                 context,
                 pathPiece,
-                std::move(scmTree),
-                std::move(wdTree),
+                std::move(scmTree.tree),
+                std::move(wdTree.tree),
                 ignore,
                 isIgnored);
           });
+}
+
+ImmediateFuture<TreeAndId> getTreeAndId(DiffContext* context, ObjectId id) {
+  return context->store->getTree(id, context->getFetchContext())
+      .thenValue([id](TreePtr tree) mutable {
+        return TreeAndId{std::move(tree), std::move(id)};
+      });
 }
 
 } // namespace
@@ -474,8 +512,12 @@ diffRoots(DiffContext* context, const RootId& root1, const RootId& root2) {
   return diffTrees(
       context,
       RelativePathPiece{},
-      std::move(future1),
-      std::move(future2),
+      std::move(future1).thenValue([](ObjectStore::GetRootTreeResult tree) {
+        return TreeAndId{tree.tree, tree.treeId};
+      }),
+      std::move(future2).thenValue([](ObjectStore::GetRootTreeResult tree) {
+        return TreeAndId{tree.tree, tree.treeId};
+      }),
       nullptr,
       false);
 }
@@ -490,8 +532,8 @@ ImmediateFuture<Unit> diffTrees(
   return diffTrees(
       context,
       currentPath,
-      context->store->getTree(scmHash, context->getFetchContext()),
-      context->store->getTree(wdHash, context->getFetchContext()),
+      getTreeAndId(context, scmHash),
+      getTreeAndId(context, wdHash),
       ignore,
       isIgnored);
 }
@@ -505,8 +547,8 @@ ImmediateFuture<Unit> diffAddedTree(
   return diffTrees(
       context,
       currentPath,
-      std::shared_ptr<const Tree>{nullptr},
-      context->store->getTree(wdHash, context->getFetchContext()),
+      TreeAndId::null(),
+      getTreeAndId(context, wdHash),
       ignore,
       isIgnored);
 }
@@ -518,8 +560,8 @@ ImmediateFuture<Unit> diffRemovedTree(
   return diffTrees(
       context,
       currentPath,
-      context->store->getTree(scmHash, context->getFetchContext()),
-      std::shared_ptr<const Tree>{nullptr},
+      getTreeAndId(context, scmHash),
+      TreeAndId::null(),
       nullptr,
       false);
 }

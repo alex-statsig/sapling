@@ -8,6 +8,7 @@
 import type {CodeReviewProvider} from './CodeReviewProvider';
 import type {ServerSideTracker} from './analytics/serverSideTracker';
 import type {Logger} from './logger';
+import type {ExecaError} from 'execa';
 import type {
   CommitInfo,
   CommitPhaseType,
@@ -33,6 +34,7 @@ import type {
   FetchedUncommittedChanges,
   FetchedCommits,
 } from 'isl/src/types';
+import type {Comparison} from 'shared/Comparison';
 
 import {Internal} from './Internal';
 import {OperationQueue} from './OperationQueue';
@@ -46,6 +48,8 @@ import execa from 'execa';
 import {CommandRunner} from 'isl/src/types';
 import os from 'os';
 import path from 'path';
+import {revsetArgsForComparison} from 'shared/Comparison';
+import {LRU} from 'shared/LRU';
 import {RateLimiter} from 'shared/RateLimiter';
 import {TypedEventEmitter} from 'shared/TypedEventEmitter';
 import {exists} from 'shared/fs';
@@ -59,6 +63,9 @@ const ESCAPED_NULL_CHAR = '\\0';
 const HEAD_MARKER = '@';
 const MAX_FETCHED_FILES_PER_COMMIT = 25;
 const MAX_SIMULTANEOUS_CAT_CALLS = 4;
+/** Timeout for non-operation commands. Operations like goto and rebase are expected to take longer,
+ * but status, log, cat, etc should typically take <10s. */
+const READ_COMMAND_TIMEOUT_MS = 40_000;
 
 const FIELDS = {
   hash: '{node}',
@@ -77,7 +84,7 @@ const FIELDS = {
   cloesestPredecessors: '{predecessors % "{node},"}',
   // This would be more elegant as a new built-in template
   diffId: '{if(phabdiff, phabdiff, github_pull_request_number)}',
-  stableCommitMetadata: Internal.stableCommitTemplate ?? '',
+  stableCommitMetadata: Internal.stableCommitConfig?.template ?? '',
   // Description must be last
   description: '{desc}',
 };
@@ -542,7 +549,7 @@ export class Repository {
       this.uncommittedChangesEmitter.emit('change', this.uncommittedChanges);
     } catch (err) {
       this.logger.error('Error fetching files: ', err);
-      if (isProcessError(err)) {
+      if (isExecaError(err)) {
         if (err.stderr.includes('checkout is currently in progress')) {
           this.logger.info('Ignoring `hg status` error caused by in-progress checkout');
           return;
@@ -612,11 +619,19 @@ export class Repository {
       };
       this.smartlogCommitsChangesEmitter.emit('change', this.smartlogCommits);
     } catch (err) {
-      this.logger.error('Error fetching commits: ', err);
+      let error = err;
+      const internalError = Internal.checkInternalError?.(err);
+      if (internalError) {
+        error = internalError;
+      }
+      if (isExecaError(error) && error.stderr.includes('Please check your internet connection')) {
+        error = Error('Network request failed. Please check your internet connection.');
+      }
+      this.logger.error('Error fetching commits: ', error);
       this.smartlogCommitsChangesEmitter.emit('change', {
         fetchStartTimestamp,
         fetchCompletedTimestamp: Date.now(),
-        commits: {error: err instanceof Error ? err : new Error(err as string)},
+        commits: {error: error instanceof Error ? error : new Error(error as string)},
       });
     }
   });
@@ -655,6 +670,82 @@ export class Repository {
     });
   }
 
+  /**
+   * Returns line-by-line blame information for a file at a given commit.
+   * Returns the line content and commit info.
+   * Note: the line will including trailing newline.
+   */
+  public async blame(
+    filePath: string,
+    hash: string,
+  ): Promise<Array<[line: string, info: CommitInfo | undefined]>> {
+    const t1 = Date.now();
+    const output = await this.runCommand(
+      ['blame', filePath, '-Tjson', '--change', '--rev', hash],
+      undefined,
+      undefined,
+      /* don't timeout */ 0,
+    );
+    const blame = JSON.parse(output.stdout) as Array<{lines: Array<{line: string; node: string}>}>;
+    const t2 = Date.now();
+
+    if (blame.length === 0) {
+      // no blame for file, perhaps it was added or untracked
+      return [];
+    }
+
+    const hashes = new Set<string>();
+    for (const line of blame[0].lines) {
+      hashes.add(line.node);
+    }
+    // We don't get all the info we need from the  blame command, so we run `sl log` on the hashes.
+    // TODO: we could make the blame command return this directly, which is probably faster.
+    // TODO: We don't actually need all the fields in FETCH_TEMPLATE for blame. Reducing this template may speed it up as well.
+    const commits = await this.lookupCommits([...hashes]);
+    const t3 = Date.now();
+    this.logger.info(
+      `Fetched ${commits.size} commits for blame. Blame took ${(t2 - t1) / 1000}s, commits took ${
+        (t3 - t2) / 1000
+      }s`,
+    );
+    return blame[0].lines.map(({node, line}) => [line, commits.get(node)]);
+  }
+
+  private commitCache = new LRU<string, CommitInfo>(100); // TODO: normal commits fetched from smartlog() aren't put in this cache---this is mostly for blame right now.
+  public async lookupCommits(hashes: Array<string>): Promise<Map<string, CommitInfo>> {
+    const hashesToFetch = hashes.filter(hash => this.commitCache.get(hash) == undefined);
+
+    const commits =
+      hashesToFetch.length === 0
+        ? [] // don't bother running log
+        : await this.runCommand([
+            'log',
+            '--template',
+            FETCH_TEMPLATE,
+            '--rev',
+            hashesToFetch.join('+'),
+          ]).then(output => {
+            return parseCommitInfoOutput(this.logger, output.stdout.trim());
+          });
+
+    const result = new Map();
+    for (const hash of hashes) {
+      const found = this.commitCache.get(hash);
+      if (found != undefined) {
+        result.set(hash, found);
+      }
+    }
+
+    for (const commit of commits) {
+      if (commit) {
+        this.commitCache.set(commit.hash, commit);
+        result.set(commit.hash, commit);
+      }
+    }
+
+    return result;
+  }
+
   public getAllDiffIds(): Array<DiffId> {
     return (
       this.getSmartlogCommits()
@@ -663,13 +754,33 @@ export class Repository {
     );
   }
 
-  public runCommand(args: Array<string>, cwd?: string, options?: execa.Options) {
+  public async runDiff(comparison: Comparison, contextLines = 4): Promise<string> {
+    const output = await this.runCommand([
+      'diff',
+      ...revsetArgsForComparison(comparison),
+      // don't include a/ and b/ prefixes on files
+      '--noprefix',
+      '--no-binary',
+      '--nodate',
+      '--unified',
+      String(contextLines),
+    ]);
+    return output.stdout;
+  }
+
+  public runCommand(
+    args: Array<string>,
+    cwd?: string,
+    options?: execa.Options,
+    timeout: number = READ_COMMAND_TIMEOUT_MS,
+  ) {
     return runCommand(
       this.info.command,
       args,
       this.logger,
       unwrap(cwd ?? this.info.repoRoot),
       options,
+      timeout,
     );
   }
 
@@ -688,16 +799,48 @@ export class Repository {
   }
 }
 
-function runCommand(
+async function runCommand(
   command_: string,
   args_: Array<string>,
   logger: Logger,
   cwd: string,
   options_?: execa.Options,
-): execa.ExecaChildProcess {
+  timeout: number = READ_COMMAND_TIMEOUT_MS,
+): Promise<execa.ExecaReturnValue<string>> {
   const {command, args, options} = getExecParams(command_, args_, cwd, options_);
   logger.log('run command: ', command, args[0]);
-  return execa(command, args, options);
+  const result = execa(command, args, options);
+
+  let timedOut = false;
+  if (timeout > 0) {
+    const timeoutId = setTimeout(() => {
+      result.kill('SIGTERM', {forceKillAfterTimeout: 5_000});
+      logger.error(`Timed out waiting for ${command} ${args[0]} to finish`);
+      timedOut = true;
+    }, timeout);
+    result.on('exit', () => {
+      clearTimeout(timeoutId);
+    });
+  }
+
+  try {
+    const val = await result;
+    return val;
+  } catch (err: unknown) {
+    if (isExecaError(err)) {
+      if (err.killed) {
+        if (timedOut) {
+          throw new Error('Timed out');
+        }
+        throw new Error('Killed');
+      }
+    }
+    throw err;
+  }
+}
+
+function isExecaError(err: unknown): err is ExecaError {
+  return typeof err === 'object' && err != null && 'exitCode' in err;
 }
 
 export const __TEST__ = {
@@ -865,7 +1008,7 @@ export function parseCommitInfoOutput(logger: Logger, output: string): SmartlogC
         diffId: lines[FIELD_INDEX.diffId] != '' ? lines[FIELD_INDEX.diffId] : undefined,
         stableCommitMetadata:
           lines[FIELD_INDEX.stableCommitMetadata] != ''
-            ? lines[FIELD_INDEX.stableCommitMetadata]
+            ? Internal.stableCommitConfig?.parse(lines[FIELD_INDEX.stableCommitMetadata])
             : undefined,
       });
     } catch (err) {
@@ -949,10 +1092,6 @@ export function repoRelativePathForAbsolutePath(
   pathMod = path,
 ): RepoRelativePath {
   return pathMod.relative(repo.info.repoRoot, absolutePath);
-}
-
-function isProcessError(s: unknown): s is {stderr: string} {
-  return s != null && typeof s === 'object' && 'stderr' in s;
 }
 
 function computeNewConflicts(

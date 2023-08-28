@@ -32,7 +32,7 @@ except NameError:
     xrange = range
 
 
-class histpacktestsbase(object):
+class histpacktestsbase:
     def __init__(self, historypackreader, historypackwriter):
         self.historypackreader = historypackreader
         self.historypackwriter = historypackwriter
@@ -238,7 +238,7 @@ class histpacktestsbase(object):
             revisions.append((filename, node, p1, p2, linknode, None))
 
         pack = self.createPack(revisions)
-        if util.safehasattr(pack, "params"):
+        if hasattr(pack, "params"):
             self.assertEqual(pack.params.fanoutprefix, LARGEFANOUTPREFIX)
 
         for filename, node, p1, p2, linknode, copyfrom in revisions:

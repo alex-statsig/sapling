@@ -119,14 +119,8 @@ fn write_requirements_file(path: &Path, requirements: HashSet<&str>) -> Result<(
 }
 
 fn write_requirements(path: &Path, config: &ConfigSet) -> Result<(), InitError> {
-    let mut requirements = HashSet::from([
-        "lz4revlog",
-        "revlogv1",
-        "store",
-        "fncache",
-        "dotencode",
-        "treestate",
-    ]);
+    let mut requirements =
+        HashSet::from(["revlogv1", "store", "fncache", "dotencode", "treestate"]);
 
     if config
         .get_or_default("format", "generaldelta")
@@ -152,6 +146,12 @@ fn write_requirements(path: &Path, config: &ConfigSet) -> Result<(), InitError> 
     };
     if enable_windows_symlinks {
         requirements.insert("windowssymlinks");
+    }
+
+    if config.get_or_default("format", "use-remotefilelog")? {
+        // For historical reason this is a repo requirement.
+        // It should be a store requirement.
+        requirements.insert("remotefilelog");
     }
 
     write_requirements_file(path, requirements)
@@ -230,7 +230,6 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             r#"dotencode
 fncache
-lz4revlog
 revlogv1
 store
 treestate
@@ -244,7 +243,6 @@ treestate
             r#"dotencode
 fncache
 generaldelta
-lz4revlog
 revlogv1
 store
 treestate

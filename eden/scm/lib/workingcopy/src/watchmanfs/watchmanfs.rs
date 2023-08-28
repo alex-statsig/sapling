@@ -20,8 +20,8 @@ use io::IO;
 use manifest_tree::ReadTreeManifest;
 use parking_lot::Mutex;
 use pathmatcher::AlwaysMatcher;
+use pathmatcher::DynMatcher;
 use pathmatcher::Matcher;
-use pathmatcher::NeverMatcher;
 use progress_model::ProgressBar;
 use repolock::RepoLocker;
 use serde::Deserialize;
@@ -40,15 +40,15 @@ use crate::filechangedetector::ArcReadFileContents;
 use crate::filechangedetector::FileChangeDetector;
 use crate::filechangedetector::FileChangeDetectorTrait;
 use crate::filechangedetector::ResolvedFileChangeResult;
-use crate::filesystem::ChangeType;
-use crate::filesystem::PendingChangeResult;
+use crate::filesystem::PendingChange;
 use crate::filesystem::PendingChanges;
 use crate::metadata;
 use crate::metadata::Metadata;
+use crate::util::dirstate_write_time_override;
+use crate::util::maybe_flush_treestate;
 use crate::util::walk_treestate;
 use crate::watchmanfs::treestate::get_clock;
 use crate::watchmanfs::treestate::list_needs_check;
-use crate::watchmanfs::treestate::maybe_flush_treestate;
 use crate::workingcopy::WorkingCopy;
 
 type ArcReadTreeManifest = Arc<dyn ReadTreeManifest + Send + Sync>;
@@ -210,14 +210,17 @@ impl PendingChanges for WatchmanFileSystem {
     #[tracing::instrument(skip_all)]
     fn pending_changes(
         &self,
-        matcher: Arc<dyn Matcher + Send + Sync + 'static>,
-        mut ignore_matcher: Arc<dyn Matcher + Send + Sync + 'static>,
+        matcher: DynMatcher,
+        ignore_matcher: DynMatcher,
         ignore_dirs: Vec<PathBuf>,
+        include_ignored: bool,
         last_write: SystemTime,
         config: &dyn Config,
         io: &IO,
-    ) -> Result<Box<dyn Iterator<Item = Result<PendingChangeResult>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Result<PendingChange>>>> {
         let ts = &mut *self.treestate.lock();
+
+        let treestate_started_dirty = ts.dirty();
 
         let ts_metadata = ts.metadata()?;
         let mut prev_clock = get_clock(&ts_metadata)?;
@@ -238,6 +241,11 @@ impl PendingChanges for WatchmanFileSystem {
             };
             tracing::info!(track_ignored = md_value, "migrating track-ignored");
             ts.update_metadata(&[("track-ignored".to_string(), Some(md_value))])?;
+        }
+
+        if include_ignored && !track_ignored {
+            // TODO: give user a hint about fsmonitor.track-ignore-files
+            prev_clock = None;
         }
 
         if config.get_or_default("devel", "watchman-reset-clock")? {
@@ -346,12 +354,6 @@ impl PendingChanges for WatchmanFileSystem {
             )
             .collect();
 
-        if track_ignored {
-            // If we want to track ignored files, say that nothing is ignored.
-            // Note that the "full" matcher will still skip ignored files.
-            ignore_matcher = Arc::new(NeverMatcher::new());
-        }
-
         let detector = FileChangeDetector::new(
             self.vfs.clone(),
             last_write.try_into()?,
@@ -362,6 +364,8 @@ impl PendingChanges for WatchmanFileSystem {
         let mut pending_changes = detect_changes(
             matcher,
             ignore_matcher,
+            track_ignored,
+            include_ignored,
             detector,
             ts,
             wm_needs_check,
@@ -381,7 +385,20 @@ impl PendingChanges for WatchmanFileSystem {
             set_clock(ts, result.clock)?;
         }
 
-        maybe_flush_treestate(self.vfs.root(), ts, &self.locker)?;
+        // Don't flush treestate if it was already dirty. If we are inside a
+        // Python transaction with uncommitted, substantial dirstate changes,
+        // those changes should not be written out until the transaction
+        // finishes.
+        if treestate_started_dirty {
+            tracing::debug!("treestate was dirty - skipping flush");
+        } else {
+            maybe_flush_treestate(
+                self.vfs.root(),
+                ts,
+                &self.locker,
+                dirstate_write_time_override(config),
+            )?;
+        }
 
         Ok(Box::new(pending_changes.into_iter()))
     }
@@ -421,8 +438,10 @@ fn warn_about_fresh_instance(io: &IO, old_pid: Option<u32>, new_pid: Option<u32>
 // in the treestate.
 #[tracing::instrument(skip_all)]
 pub(crate) fn detect_changes(
-    matcher: Arc<dyn Matcher + Send + Sync + 'static>,
-    ignore_matcher: Arc<dyn Matcher + Send + Sync + 'static>,
+    matcher: DynMatcher,
+    ignore_matcher: DynMatcher,
+    track_ignored: bool,
+    include_ignored: bool,
     mut file_change_detector: impl FileChangeDetectorTrait + 'static,
     ts: &mut TreeState,
     wm_need_check: Vec<metadata::File>,
@@ -437,9 +456,9 @@ pub(crate) fn detect_changes(
     // necessarily contain all NEED_CHECK entries in the treestate.
     let ts_need_check: HashSet<_> = ts_need_check.into_iter().collect();
 
-    let mut pending_changes: Vec<Result<PendingChangeResult>> =
+    let mut pending_changes: Vec<Result<PendingChange>> =
         ts_errors.into_iter().map(|e| Err(anyhow!(e))).collect();
-    let mut needs_clear = Vec::new();
+    let mut needs_clear: Vec<(RepoPathBuf, Option<Metadata>)> = Vec::new();
     let mut needs_mark = Vec::new();
 
     tracing::debug!(
@@ -469,6 +488,14 @@ pub(crate) fn detect_changes(
             continue;
         }
 
+        // This check is important when we are tracking ignored files.
+        // We won't do a fresh watchman query, so we must get the list
+        // of ignored files from the treestate.
+        if include_ignored && ignore_matcher.matches_file(ts_needs_check)? {
+            pending_changes.push(Ok(PendingChange::Ignored(ts_needs_check.clone())));
+            continue;
+        }
+
         // We don't need the ignore check since ts_need_check was filtered by
         // the full matcher, which incorporates the ignore matcher.
         file_change_detector.submit(metadata::File {
@@ -485,16 +512,29 @@ pub(crate) fn detect_changes(
     for mut wm_needs_check in wm_need_check {
         let state = ts.normalized_get(&wm_needs_check.path)?;
 
+        // is_tracked is used to short circuit invocations of the ignore
+        // matcher, which can be expensive.
         let is_tracked = match &state {
             Some(state) => state
                 .state
                 .intersects(StateFlags::EXIST_P1 | StateFlags::EXIST_P2 | StateFlags::EXIST_NEXT),
             None => false,
         };
-        // Skip ignored files to reduce work. We short circuit with an
-        // "untracked" check to minimize use of the GitignoreMatcher.
-        if !is_tracked && ignore_matcher.matches_file(&wm_needs_check.path)? {
-            continue;
+
+        if !is_tracked {
+            if let Some(Some(fs_meta)) = &wm_needs_check.fs_meta {
+                if fs_meta.is_dir() {
+                    continue;
+                }
+            }
+
+            let ignored = ignore_matcher.matches_file(&wm_needs_check.path)?;
+            if include_ignored && ignored {
+                pending_changes.push(Ok(PendingChange::Ignored(wm_needs_check.path.clone())));
+            }
+            if !track_ignored && ignored {
+                continue;
+            }
         }
 
         wm_needs_check.ts_state = state;
@@ -512,18 +552,21 @@ pub(crate) fn detect_changes(
         match result {
             Ok(ResolvedFileChangeResult::Yes(change)) => {
                 let path = change.get_path();
-                if let ChangeType::Deleted(path) = change {
+                if let PendingChange::Deleted(path) = change {
                     deletes.push(path);
                 } else {
                     if !ts_need_check.contains(path) {
                         needs_mark.push(path.clone());
                     }
-                    pending_changes.push(Ok(PendingChangeResult::File(change)));
+                    pending_changes.push(Ok(change));
                 }
             }
-            Ok(ResolvedFileChangeResult::No(path)) => {
-                if ts_need_check.contains(&path) {
-                    needs_clear.push(path);
+            Ok(ResolvedFileChangeResult::No((path, fs_meta))) => {
+                // File is clean. Update treestate entry if it was marked
+                // NEED_CHECK, or if we have fs_meta which implies treestate
+                // metadata (e.g. mtime, size, etc.) is out of date.
+                if ts_need_check.contains(&path) || fs_meta.is_some() {
+                    needs_clear.push((path, fs_meta));
                 }
             }
             Err(e) => pending_changes.push(Err(e)),
@@ -561,7 +604,7 @@ pub(crate) fn detect_changes(
             StateFlags::EXIST_NEXT | StateFlags::EXIST_P1 | StateFlags::EXIST_P2,
             |path, _state| {
                 if !wm_seen.contains(&path) {
-                    needs_clear.push(path);
+                    needs_clear.push((path, None));
                 }
                 Ok(())
             },
@@ -602,7 +645,7 @@ pub(crate) fn detect_changes(
             if !ts_need_check.contains(&d) {
                 needs_mark.push(d.clone());
             }
-            pending_changes.push(Ok(PendingChangeResult::File(ChangeType::Deleted(d))));
+            pending_changes.push(Ok(PendingChange::Deleted(d)));
         }
     }
 
@@ -614,8 +657,8 @@ pub(crate) fn detect_changes(
 }
 
 pub struct WatchmanPendingChanges {
-    pending_changes: Vec<Result<PendingChangeResult>>,
-    needs_clear: Vec<RepoPathBuf>,
+    pending_changes: Vec<Result<PendingChange>>,
+    needs_clear: Vec<(RepoPathBuf, Option<Metadata>)>,
     needs_mark: Vec<RepoPathBuf>,
 }
 
@@ -629,8 +672,8 @@ impl WatchmanPendingChanges {
         );
 
         let mut wrote = false;
-        for path in self.needs_clear.iter() {
-            match clear_needs_check(ts, path) {
+        for (path, fs_meta) in self.needs_clear.drain(..) {
+            match clear_needs_check(ts, &path, fs_meta) {
                 Ok(v) => wrote |= v,
                 Err(e) =>
                 // We can still build a valid result if we fail to clear the
@@ -654,7 +697,7 @@ impl WatchmanPendingChanges {
 }
 
 impl IntoIterator for WatchmanPendingChanges {
-    type Item = Result<PendingChangeResult>;
+    type Item = Result<PendingChange>;
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {

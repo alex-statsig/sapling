@@ -8,7 +8,7 @@
 use std::fmt;
 
 use anyhow::Error;
-use regex::Regex;
+use fancy_regex::Regex;
 
 enum TranslationOutput {
     Literal(String),
@@ -151,7 +151,7 @@ pub struct LuaPattern {
 
 impl LuaPattern {
     pub fn is_match(&self, s: &str) -> bool {
-        self.regex.is_match(s)
+        self.regex.is_match(s).unwrap_or(false)
     }
 
     #[allow(dead_code)]
@@ -163,6 +163,13 @@ impl LuaPattern {
 impl TryFrom<&str> for LuaPattern {
     type Error = Error;
     fn try_from(other: &str) -> Result<Self, Error> {
+        if let Some(other) = other.strip_prefix("re:") {
+            let regex = Regex::new(other)?;
+            return Ok(Self {
+                original: other.to_string(),
+                regex,
+            });
+        }
         let regex = Regex::new(&pattern_to_regex(other))?;
         Ok(Self {
             original: other.to_string(),
@@ -174,6 +181,13 @@ impl TryFrom<&str> for LuaPattern {
 impl TryFrom<String> for LuaPattern {
     type Error = Error;
     fn try_from(other: String) -> Result<Self, Error> {
+        if let Some(other) = other.strip_prefix("re:") {
+            let regex = Regex::new(other)?;
+            return Ok(Self {
+                original: other.to_string(),
+                regex,
+            });
+        }
         let regex = Regex::new(&pattern_to_regex(&other))?;
         Ok(Self {
             original: other,
@@ -232,5 +246,29 @@ mod tests {
             .expect("Could not map pattern to regex");
         assert!(pattern.is_match("buck-out/file"));
         assert!(!pattern.is_match("/buck-out/file"));
+    }
+
+    #[test]
+    fn test_re_matching() {
+        let pattern: LuaPattern = "re:^[.]git/"
+            .try_into()
+            .expect("Could not map pattern to regex");
+        assert!(pattern.is_match(".git/foo"));
+        assert!(!pattern.is_match("./git/foo"));
+
+        let pattern: LuaPattern = "re:^buck-out/"
+            .try_into()
+            .expect("Could not map pattern to regex");
+        assert!(pattern.is_match("buck-out/file"));
+        assert!(!pattern.is_match("/buck-out/file"));
+    }
+
+    #[test]
+    fn test_fancy_re_matching() {
+        let pattern: LuaPattern = "re:^www/(?!html/(xplat-react|megarepo))"
+            .try_into()
+            .expect("Could not map pattern to regex");
+        assert!(pattern.is_match("www/html/foo"));
+        assert!(!pattern.is_match("www/html/xplat-react"));
     }
 }

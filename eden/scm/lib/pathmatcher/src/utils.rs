@@ -132,7 +132,7 @@ pub fn expand_curly_brackets(pat: &str) -> Vec<String> {
 
 /// Normalize a less strict glob pattern to a strict glob pattern.
 ///
-/// In a strict glob pattern, `**` can only be a single directory component.
+/// In a strict glob pattern, `**` must be alone as a directory component.
 pub fn normalize_glob(pat: &str) -> String {
     let mut result = String::with_capacity(pat.len());
     let chars: Vec<_> = pat.chars().collect();
@@ -172,12 +172,36 @@ pub fn plain_to_glob(plain: &str) -> String {
     }
     for ch in plain.chars() {
         match ch {
-            '\\' | '*' | '{' | '}' | '[' | ']' => result.push('\\'),
+            '\\' | '*' | '{' | '}' | '[' | ']' | '?' => result.push('\\'),
             _ => {}
         }
         result.push(ch);
     }
     result
+}
+
+pub(crate) fn make_glob_recursive(glob: &str) -> String {
+    if glob.is_empty() || glob.ends_with('/') {
+        format!("{glob}**")
+    } else {
+        format!("{glob}/**")
+    }
+}
+
+// Return byte index of first glob operator, if any.
+pub(crate) fn first_glob_operator_index(glob: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, ch) in glob.char_indices() {
+        if ch == '\\' {
+            escaped = !escaped;
+        } else if !escaped && matches!(ch, '*' | '{' | '}' | '[' | ']' | '?') {
+            return Some(offset);
+        } else {
+            escaped = false;
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -197,8 +221,17 @@ mod tests {
 
     #[test]
     fn test_plain_to_glob() {
-        assert_eq!(plain_to_glob("a[b{c*d\\e}]"), "a\\[b\\{c\\*d\\\\e\\}\\]");
+        assert_eq!(plain_to_glob(r"a[b{c*d\e}]"), r"a\[b\{c\*d\\e\}\]");
         assert_eq!(plain_to_glob(""), "");
-        assert_eq!(plain_to_glob("!a!"), "\\!a!");
+        assert_eq!(plain_to_glob("!a!"), r"\!a!");
+        assert_eq!(plain_to_glob("foo.jpe?g"), r"foo.jpe\?g");
+    }
+
+    #[test]
+    fn test_contains_glob_operator() {
+        assert_eq!(first_glob_operator_index(""), None);
+        assert_eq!(first_glob_operator_index("*"), Some(0));
+        assert_eq!(first_glob_operator_index(r"\*"), None);
+        assert_eq!(first_glob_operator_index(r"\\?"), Some(2));
     }
 }

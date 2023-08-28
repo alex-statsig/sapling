@@ -86,7 +86,11 @@ export function registerISLCommands(
       }
     }),
     registerDeserializer(context, logger),
-    vscode.window.registerWebviewViewProvider(viewType, webviewViewProvider),
+    vscode.window.registerWebviewViewProvider(viewType, webviewViewProvider, {
+      webviewOptions: {
+        retainContextWhenHidden: true,
+      },
+    }),
     vscode.workspace.onDidChangeConfiguration(e => {
       // if we start using ISL as a view, dispose the panel
       if (e.affectsConfiguration('sapling.isl.showInSidebar')) {
@@ -210,13 +214,13 @@ function htmlForISLWebview(
   const extraRootClass = `webview-${kind}`;
 
   const CSP = [
-    "default-src 'none'",
+    `default-src ${webview.cspSource}`,
     `style-src ${webview.cspSource}`,
     // vscode-webview-ui needs to use style-src-elem without the nonce
     `style-src-elem ${webview.cspSource} 'unsafe-inline'`,
     `font-src ${webview.cspSource} data:`,
     `img-src ${webview.cspSource} https: data:`,
-    `script-src 'nonce-${nonce}'`,
+    `script-src 'nonce-${nonce}' 'wasm-unsafe-eval'`,
     `script-src-elem 'nonce-${nonce}'`,
   ].join('; ');
 

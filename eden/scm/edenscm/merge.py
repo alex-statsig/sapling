@@ -14,6 +14,7 @@ from __future__ import absolute_import
 
 import errno
 import hashlib
+import posixpath
 import shutil
 import struct
 
@@ -51,7 +52,7 @@ _pack = struct.pack
 _unpack = struct.unpack
 
 
-class mergestate(object):
+class mergestate:
     """track 3-way merge state of individual files
 
     The merge state is stored on disk when needed. For more about the format,
@@ -644,7 +645,7 @@ def _checkunknownfile(repo, wctx, mctx, f, f2=None):
     )
 
 
-class _unknowndirschecker(object):
+class _unknowndirschecker:
     """
     Look for any unknown files or directories that may have a path conflict
     with a file.  If any path prefix of the file exists as a file or link,
@@ -693,7 +694,7 @@ class _unknowndirschecker(object):
             # Does the directory contain any files that are not in the dirstate?
             for p, dirs, files in repo.wvfs.walk(f):
                 for fn in files:
-                    relf = repo.dirstate.normalize(repo.wvfs.reljoin(p, fn))
+                    relf = repo.dirstate.normalize(posixpath.join(p, fn))
                     if relf not in repo.dirstate:
                         return f
         return None
@@ -1112,11 +1113,11 @@ def manifestmerge(
         matcher = matchmod.intersectmatchers(matcher, sparsematcher)
 
     with perftrace.trace("Manifest Diff"):
-        if util.safehasattr(repo, "resettreefetches"):
+        if hasattr(repo, "resettreefetches"):
             repo.resettreefetches()
         diff = m1.diff(m2, matcher=matcher)
         perftrace.tracevalue("Differences", len(diff))
-        if util.safehasattr(repo, "resettreefetches"):
+        if hasattr(repo, "resettreefetches"):
             perftrace.tracevalue("Tree Fetches", repo.resettreefetches())
 
     if matcher is None:
@@ -1144,9 +1145,7 @@ def manifestmerge(
                 if n2 == a and fl2 == fla:
                     actions[f] = ("k", (), "remote unchanged")
                 elif n1 == a and fl1 == fla:  # local unchanged - use remote
-                    if n1 == n2:  # optimization: keep local content
-                        actions[f] = ("e", (fl2,), "update permissions")
-                    elif fl1 == fl2:
+                    if fl1 == fl2:
                         actions[f] = ("g", (fl2, False), "remote is newer")
                     else:
                         actions[f] = ("rg", (fl2, False), "flag differ")
@@ -2331,7 +2330,7 @@ def update(
                 fallbackcheckout = (
                     "Working copy is dirty and --clean specified - not supported yet"
                 )
-            elif not util.safehasattr(repo.fileslog, "contentstore"):
+            elif not hasattr(repo.fileslog, "contentstore"):
                 fallbackcheckout = "Repo does not have remotefilelog"
             elif type(repo.dirstate._map) != treestate.treestatemap:
                 fallbackcheckout = "Repo repo.dirstate._map: %s" % type(
@@ -2401,13 +2400,15 @@ def update(
                 dirty = wc.dirty(missing=True)
                 if dirty:
                     # Branching is a bit strange to ensure we do the minimal
-                    # amount of call to mutation.foreground.
+                    # amount of call to mutation.foreground_contains.
                     if mutation.enabled(repo):
-                        foreground = mutation.foreground(repo, [p1.node()])
+                        in_foreground = mutation.foreground_contains(
+                            repo, [p1.node()], repo[node].node()
+                        )
                     else:
-                        foreground = set()
+                        in_foreground = False
                     # note: the <node> variable contains a random identifier
-                    if repo[node].node() in foreground:
+                    if in_foreground:
                         pass  # allow updating to successors
                     else:
                         msg = _("uncommitted changes")
@@ -2575,7 +2576,7 @@ def update(
                 # Ideally this would be part of some wider transaction framework
                 # that ensures these things all happen atomically, but that
                 # doesn't exist for the dirstate right now.
-                if util.safehasattr(repo, "_persistprofileconfigs"):
+                if hasattr(repo, "_persistprofileconfigs"):
                     repo._persistprofileconfigs()
 
                 if not branchmerge:
@@ -2752,7 +2753,7 @@ def donativecheckout(repo, p1, p2, xp1, xp2, matcher, force, partial, wc, prerec
             # Ideally this would be part of some wider transaction framework
             # that ensures these things all happen atomically, but that
             # doesn't exist for the dirstate right now.
-            if util.safehasattr(repo, "_persistprofileconfigs"):
+            if hasattr(repo, "_persistprofileconfigs"):
                 repo._persistprofileconfigs()
 
     if not partial:

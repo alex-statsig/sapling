@@ -57,18 +57,19 @@ class bundlerevlog(revlog.revlog):
         # (start). The base of the delta is stored in the base field.
         #
         # To differentiate a rev in the bundle from a rev in the revlog, we
-        # check revision against repotiprev.
+        # check revision against bundlerevs.
         opener = vfsmod.readonlyvfs(opener)
         # bundlechangelog might have called revlog.revlog.__init__ already.
         # avoid re-init the revlog.
-        if not util.safehasattr(self, "opener"):
+        if not hasattr(self, "opener"):
             index2 = indexfile.startswith("00changelog")
             revlog.revlog.__init__(self, opener, indexfile, index2=index2)
+        self.bundlenode2rawtext = {}
         inner = getattr(self, "inner", None)
         index2 = getattr(self, "index2", None)
         self.bundle = cgunpacker
         n = len(self)
-        self.repotiprev = n - 1
+        self.bundlenewrevs = set()
         self.bundlerevs = set()  # used by 'bundle()' revset expression
         self.bundleheads = set()  # used by visibility
         for deltadata in cgunpacker.deltaiter():
@@ -78,10 +79,11 @@ class bundlerevlog(revlog.revlog):
             start = cgunpacker.tell() - size
 
             link = linkmapper(cs)
+            exists = False
             if node in self.nodemap:
                 # this can happen if two branches make the same change
                 self.bundlerevs.add(self.nodemap[node])
-                continue
+                exists = True
 
             for p in (p1, p2):
                 if p not in self.nodemap:
@@ -89,6 +91,15 @@ class bundlerevlog(revlog.revlog):
 
             if deltabase not in self.nodemap:
                 raise LookupError(deltabase, self.indexfile, _("unknown delta base"))
+
+            # figure out the text
+            parentnodes = [p for p in (p1, p2) if p != nullid]
+            basetext = self.revision(deltabase)
+            text = bytes(mdiff.patches(basetext, [delta]))
+            self.bundlenode2rawtext[node] = text
+
+            if exists:
+                continue
 
             baserev = self.rev(deltabase)
             p1rev = self.rev(p1)
@@ -105,16 +116,15 @@ class bundlerevlog(revlog.revlog):
                 node,
             )
             if self.index is not None:
-                self.index.insert(-1, e)
+                new_rev = self.index.insert(-1, e)
+                assert new_rev == n
             if index2 is not None:
                 index2.insert(node, [p for p in (p1rev, p2rev) if p >= 0])
             if inner is not None:
-                parentnodes = [p for p in (p1, p2) if p != nullid]
-                basetext = self.revision(deltabase)
-                text = mdiff.patches(basetext, [delta])
-                inner.addcommits([(node, parentnodes, bytes(text))])
+                inner.addcommits([(node, parentnodes, text)])
             self.nodemap[node] = n
             self.bundlerevs.add(n)
+            self.bundlenewrevs.add(n)
             self.bundleheads.add(n)
             self.bundleheads.discard(p1rev)
             self.bundleheads.discard(p2rev)
@@ -125,20 +135,18 @@ class bundlerevlog(revlog.revlog):
         # Warning: in case of bundle, the diff is against what we stored as
         # delta base, not against rev - 1
         # XXX: could use some caching
-        if rev <= self.repotiprev:
-            return revlog.revlog._chunk(self, rev)
+        if rev not in self.bundlenewrevs:
+            return super()._chunk(self, rev)
         self.bundle.seek(self.start(rev))
         return self.bundle.read(self.length(rev))
 
     def revdiff(self, rev1, rev2):
         """return or calculate a delta between two revisions"""
-        if rev1 > self.repotiprev and rev2 > self.repotiprev:
+        if rev1 in self.bundlenewrevs and rev2 in self.bundlenewrevs:
             # hot path for bundle
             revb = self.index[rev2][3]
             if revb == rev1:
                 return self._chunk(rev2)
-        elif rev1 <= self.repotiprev and rev2 <= self.repotiprev:
-            return revlog.revlog.revdiff(self, rev1, rev2)
 
         return mdiff.textdiff(
             self.revision(rev1, raw=True), self.revision(rev2, raw=True)
@@ -163,24 +171,25 @@ class bundlerevlog(revlog.revlog):
         if node == nullid:
             return b""
 
-        rawtext = None
-        chain = []
-        iterrev = rev
-        cache = self._cache
-        # reconstruct the revision if it is from a changegroup
-        while iterrev > self.repotiprev:
-            if cache is not None:
-                if cache[1] == iterrev:
-                    rawtext = cache[2]
-                    break
-            chain.append(iterrev)
-            iterrev = self.index[iterrev][3]
+        rawtext = self.bundlenode2rawtext.get(node)
         if rawtext is None:
-            rawtext = self.baserevision(iterrev)
+            chain = []
+            iterrev = rev
+            cache = self._cache
+            # reconstruct the revision if it is from a changegroup
+            while iterrev in self.bundlenewrevs:
+                if cache is not None:
+                    if cache[1] == iterrev:
+                        rawtext = cache[2]
+                        break
+                chain.append(iterrev)
+                iterrev = self.index[iterrev][3]
+            if rawtext is None:
+                rawtext = self.baserevision(iterrev)
 
-        while chain:
-            delta = self._chunk(chain.pop())
-            rawtext = mdiff.patches(rawtext, [delta])
+            while chain:
+                delta = self._chunk(chain.pop())
+                rawtext = mdiff.patches(rawtext, [delta])
 
         text, validatehash = self._processflags(
             rawtext, self.flags(rev), "read", raw=raw
@@ -191,10 +200,7 @@ class bundlerevlog(revlog.revlog):
         return text
 
     def baserevision(self, nodeorrev):
-        # Revlog subclasses may override 'revision' method to modify format of
-        # content retrieved from revlog. To use bundlerevlog with such class one
-        # needs to override 'baserevision' and make more specific call here.
-        return revlog.revlog.revision(self, nodeorrev, raw=True)
+        return super().revision(self, nodeorrev, raw=True)
 
     def addrevision(self, *args, **kwargs):
         raise NotImplementedError
@@ -304,7 +310,7 @@ class bundlepeer(localrepo.localpeer):
 class bundlephasecache(phases.phasecache):
     def __init__(self, *args, **kwargs):
         super(bundlephasecache, self).__init__(*args, **kwargs)
-        if util.safehasattr(self, "opener"):
+        if hasattr(self, "opener"):
             self.opener = vfsmod.readonlyvfs(self.opener)
 
     def write(self):
@@ -576,7 +582,7 @@ def instance(ui, path, create, initial_config):
     return bundlerepository(ui, repopath, bundlename)
 
 
-class bundletransactionmanager(object):
+class bundletransactionmanager:
     def transaction(self):
         return None
 

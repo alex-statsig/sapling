@@ -14,6 +14,7 @@
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBuf.h>
 #include <folly/json.h>
+#include <optional>
 #include "eden/fs/utils/FileUtils.h"
 #include "eden/fs/utils/PathMap.h"
 #include "eden/fs/utils/SystemError.h"
@@ -22,6 +23,8 @@
 using folly::ByteRange;
 using folly::IOBuf;
 using folly::StringPiece;
+
+using namespace std::literals::chrono_literals;
 
 namespace facebook::eden {
 namespace {
@@ -34,6 +37,7 @@ constexpr folly::StringPiece kRepoSourceKey{"path"};
 constexpr folly::StringPiece kRepoTypeKey{"type"};
 constexpr folly::StringPiece kRepoCaseSensitiveKey{"case-sensitive"};
 constexpr folly::StringPiece kMountProtocol{"protocol"};
+constexpr folly::StringPiece kInodeCatalogType{"inode-catalog-type"};
 constexpr folly::StringPiece kRequireUtf8Path{"require-utf8-path"};
 constexpr folly::StringPiece kEnableSqliteOverlay{"enable-sqlite-overlay"};
 constexpr folly::StringPiece kUseWriteBackCache{"use-write-back-cache"};
@@ -190,6 +194,33 @@ ParentCommit CheckoutConfig::getParentCommit() const {
 }
 
 namespace {
+
+constexpr int kNumWriteFileAtomicRetry = 3;
+
+/**
+ * Retry writing the passed in file on failure.
+ *
+ * On Windows, we've seen rare cases where the SNAPSHOT file cannot be written
+ * due to a permission denied. This is more than likely caused by an anti-virus
+ * software opening the file in an exclusive way and should be transient, thus
+ * retrying a couple of times should more than likely succeed.
+ */
+folly::Try<void> writeFileAtomicWithRetry(
+    AbsolutePathPiece path,
+    folly::ByteRange content) {
+  for (int i = 0; i < kNumWriteFileAtomicRetry - 1; i++) {
+    auto ret = writeFileAtomic(path, content);
+    if (ret.hasValue()) {
+      return ret;
+    }
+    // TODO(T162069531): This code runs in a Future context, we should ideally
+    // futurize all of this to prevent blocking an executor.
+    /* sleep override */
+    std::this_thread::sleep_for(1ms);
+  }
+  return writeFileAtomic(path, content);
+}
+
 void writeWorkingCopyParentAndCheckedOutRevisision(
     AbsolutePathPiece path,
     const RootId& workingCopy,
@@ -220,7 +251,7 @@ void writeWorkingCopyParentAndCheckedOutRevisision(
   cursor.writeBE<uint32_t>(checkedOutString.size());
   cursor.push(folly::StringPiece{checkedOutString});
 
-  writeFileAtomic(path, ByteRange{buf->data(), buf->length()}).value();
+  writeFileAtomicWithRetry(path, ByteRange{buf->data(), buf->length()}).value();
 }
 } // namespace
 
@@ -269,7 +300,8 @@ void CheckoutConfig::setCheckoutInProgress(const RootId& from, const RootId& to)
   cursor.writeBE<uint32_t>(toString.size());
   cursor.push(folly::StringPiece{toString});
 
-  writeFileAtomic(getSnapshotPath(), ByteRange{buf->data(), buf->length()})
+  writeFileAtomicWithRetry(
+      getSnapshotPath(), ByteRange{buf->data(), buf->length()})
       .value();
 }
 
@@ -300,11 +332,11 @@ std::unique_ptr<CheckoutConfig> CheckoutConfig::loadFromClientDirectory(
   config->repoType_ = *repository->get_as<std::string>(kRepoTypeKey.str());
   config->repoSource_ = *repository->get_as<std::string>(kRepoSourceKey.str());
 
-  FieldConverter<MountProtocol> converter;
+  FieldConverter<MountProtocol> mountProtocolConverter;
   MountProtocol mountProtocol = kMountProtocolDefault;
   auto mountProtocolStr = repository->get_as<std::string>(kMountProtocol.str());
   if (mountProtocolStr) {
-    mountProtocol = converter.fromString(*mountProtocolStr, {})
+    mountProtocol = mountProtocolConverter.fromString(*mountProtocolStr, {})
                         .value_or(kMountProtocolDefault);
   }
   config->mountProtocol_ = mountProtocol;
@@ -317,6 +349,19 @@ std::unique_ptr<CheckoutConfig> CheckoutConfig::loadFromClientDirectory(
 
   auto requireUtf8Path = repository->get_as<bool>(kRequireUtf8Path.str());
   config->requireUtf8Path_ = requireUtf8Path ? *requireUtf8Path : true;
+
+  FieldConverter<InodeCatalogType> inodeCatalogTypeConverter;
+  std::optional<InodeCatalogType> inodeCatalogType;
+  auto inodeCatalogTypeStr =
+      repository->get_as<std::string>(kInodeCatalogType.str());
+  if (inodeCatalogTypeStr) {
+    auto result =
+        inodeCatalogTypeConverter.fromString(*inodeCatalogTypeStr, {});
+    if (result.hasValue()) {
+      inodeCatalogType = result.value();
+    }
+  }
+  config->inodeCatalogType_ = inodeCatalogType;
 
   // TODO(xavierd): Remove the Windows check once D44683911 has been rolled out
   // for several months at which point all the CheckoutConfig will have been

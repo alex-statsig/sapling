@@ -78,7 +78,6 @@ configitem("remotenames", "disallowedhint", default=None)
 configitem("remotenames", "disallowedto", default=None)
 configitem("remotenames", "forcecompat", default=False)
 configitem("remotenames", "forceto", default=False)
-configitem("remotenames", "hoist", default="default")
 configitem("remotenames", "precachecurrent", default=True)
 configitem("remotenames", "precachedistance", default=True)
 configitem("remotenames", "pushanonheads", default=False)
@@ -223,7 +222,7 @@ def _expull(orig, repo, remote, heads=None, force=False, **kwargs):
 def pullremotenames(repo, remote, bookmarks):
     # when working between multiple local repos which do not all have
     # remotenames enabled, do this work only for those with it enabled
-    if not util.safehasattr(repo, "_remotenames"):
+    if not hasattr(repo, "_remotenames"):
         return
 
     path = activepath(repo.ui, remote)
@@ -255,7 +254,7 @@ def pullremotenames(repo, remote, bookmarks):
 def blockerhook(orig, repo, *args, **kwargs):
     blockers = orig(repo)
 
-    unblock = util.safehasattr(repo, "_unblockhiddenremotenames")
+    unblock = hasattr(repo, "_unblockhiddenremotenames")
     if not unblock:
         return blockers
 
@@ -463,7 +462,7 @@ def extsetup(ui):
     extensions.wrapfunction(exchange, "pull", expull)
     extensions.wrapfunction(bookmarks, "updatefromremote", exupdatefromremote)
     extensions.wrapfunction(bookmarks, "reachablerevs", exreachablerevs)
-    if util.safehasattr(bookmarks, "activate"):
+    if hasattr(bookmarks, "activate"):
         extensions.wrapfunction(bookmarks, "activate", exactivate)
     else:
         extensions.wrapfunction(bookmarks, "setcurrent", exactivate)
@@ -471,7 +470,7 @@ def extsetup(ui):
     extensions.wrapfunction(hg, "updaterepo", exupdate)
     extensions.wrapfunction(localrepo.localrepository, "commit", excommit)
 
-    if util.safehasattr(discovery, "_nowarnheads"):
+    if hasattr(discovery, "_nowarnheads"):
         extensions.wrapfunction(discovery, "_nowarnheads", exnowarnheads)
 
     if _tracking(ui):
@@ -672,14 +671,19 @@ def expushdiscoverybookmarks(pushop):
         # the first check isn't technically about non-fg moves, but the non-fg
         # check relies on the old bm location being in the local repo
         if old not in repo:
-            msg = _("remote bookmark revision is not in local repo")
+            msg = _("remote bookmark %s revision %s is not in local repo") % (
+                bookmark,
+                old,
+            )
             hint = _("pull and merge or rebase or use --non-forward-move")
             raise error.Abort(msg, hint=hint)
         if mutation.enabled(repo):
-            foreground = mutation.foreground(repo, [repo.lookup(old)])
+            in_foreground = mutation.foreground_contains(
+                repo, [repo.lookup(old)], repo[rev].node()
+            )
         else:
-            foreground = set()
-        if repo[rev].node() not in foreground:
+            in_foreground = False
+        if not in_foreground:
             msg = _("pushed rev is not in the foreground of remote bookmark")
             hint = _("use --non-forward-move flag to complete arbitrary moves")
             raise error.Abort(msg, hint=hint)
@@ -1484,7 +1488,7 @@ def precachedistance(repo):
     """
     # when working between multiple local repos which do not all have
     # remotenames enabled, do this work only for those with it enabled
-    if not util.safehasattr(repo, "_remotenames"):
+    if not hasattr(repo, "_remotenames"):
         return
 
     # to avoid stale namespaces, let's reload

@@ -23,6 +23,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use basename_suffix_skeleton_manifest::RootBasenameSuffixSkeletonManifest;
 use blame::RootBlameV2;
+use bonsai_git_mapping::BonsaiGitMappingArc;
 use bonsai_hg_mapping::BonsaiHgMappingArc;
 use changeset_fetcher::ChangesetFetcherArc;
 use changeset_info::ChangesetInfo;
@@ -55,7 +56,9 @@ use futures::Stream;
 use futures::TryFutureExt;
 use futures::TryStreamExt;
 use futures_stats::TimedTryFutureExt;
+use git_types::MappedGitCommitId;
 use git_types::TreeHandle;
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use lock_ext::LockExt;
 use mercurial_derivation::MappedHgChangesetId;
@@ -64,6 +67,7 @@ use mononoke_types::ChangesetId;
 use repo_blobstore::RepoBlobstoreRef;
 use repo_derived_data::RepoDerivedData;
 use repo_derived_data::RepoDerivedDataArc;
+use repo_derived_data::RepoDerivedDataRef;
 use repo_identity::RepoIdentityRef;
 use scuba_ext::MononokeScubaSampleBuilder;
 use skeleton_manifest::RootSkeletonManifestId;
@@ -82,6 +86,7 @@ pub const POSSIBLE_DERIVED_TYPES: &[&str] = &[
     FilenodesOnlyPublic::NAME,
     RootSkeletonManifestId::NAME,
     TreeHandle::NAME,
+    MappedGitCommitId::NAME,
     RootDeletedManifestV2Id::NAME,
     RootBasenameSuffixSkeletonManifest::NAME,
 ];
@@ -128,9 +133,11 @@ lazy_static! {
 }
 
 pub trait Repo = RepoDerivedDataArc
+    + RepoDerivedDataRef
     + RepoIdentityRef
     + ChangesetsArc
     + BonsaiHgMappingArc
+    + BonsaiGitMappingArc
     + FilenodesArc
     + RepoBlobstoreRef
     + CommitGraphArc;
@@ -168,6 +175,20 @@ pub fn derive_data_for_csids(
         derivations.try_for_each(|_| ready(Ok(()))).await?;
         Ok(())
     })
+}
+
+pub fn derive_all_enabled_datatypes_for_csids(
+    ctx: &CoreContext,
+    repo: &(impl Repo + Clone + Send + Sync + 'static),
+    csids: Vec<ChangesetId>,
+) -> Result<impl Future<Output = Result<(), Error>>, Error> {
+    let active_config = repo.repo_derived_data().active_config();
+    derive_data_for_csids(
+        ctx,
+        repo,
+        csids,
+        &active_config.types.iter().cloned().collect_vec(),
+    )
 }
 
 #[async_trait]
@@ -249,6 +270,7 @@ impl<Derivable> DerivedUtilsFromManager<Derivable> {
             repo.changesets_arc(),
             repo.commit_graph_arc(),
             repo.bonsai_hg_mapping_arc(),
+            repo.bonsai_git_mapping_arc(),
             repo.filenodes_arc(),
             repo.repo_blobstore().clone(),
             lease,
@@ -495,6 +517,11 @@ fn derived_data_utils_impl(
             repo, config, enabled_config_name
         ))),
         TreeHandle::NAME => Ok(Arc::new(DerivedUtilsFromManager::<TreeHandle>::new(
+            repo,
+            config,
+            enabled_config_name,
+        ))),
+        MappedGitCommitId::NAME => Ok(Arc::new(DerivedUtilsFromManager::<MappedGitCommitId>::new(
             repo,
             config,
             enabled_config_name,
@@ -1026,6 +1053,11 @@ pub async fn check_derived(
                 .map_ok(|res| res.is_some())
                 .await
         }
+        DerivableType::GitCommit => {
+            ddm.fetch_derived::<MappedGitCommitId>(ctx, head_cs_id, None)
+                .map_ok(|res| res.is_some())
+                .await
+        }
         DerivableType::Bssm => {
             ddm.fetch_derived::<RootBasenameSuffixSkeletonManifest>(ctx, head_cs_id, None)
                 .map_ok(|res| res.is_some())
@@ -1040,6 +1072,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use bonsai_git_mapping::BonsaiGitMapping;
     use bonsai_hg_mapping::BonsaiHgMapping;
     use bookmarks::BookmarkKey;
     use bookmarks::Bookmarks;
@@ -1067,6 +1100,8 @@ mod tests {
     struct TestRepo {
         #[facet]
         bonsai_hg_mapping: dyn BonsaiHgMapping,
+        #[facet]
+        bonsai_git_mapping: dyn BonsaiGitMapping,
         #[facet]
         bookmarks: dyn Bookmarks,
         #[facet]

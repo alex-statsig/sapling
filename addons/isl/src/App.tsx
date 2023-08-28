@@ -7,6 +7,7 @@
 
 import type {RepositoryError} from './types';
 
+import {AccessGlobalRecoil} from './AccessGlobalRecoil';
 import {CommandHistoryAndProgress} from './CommandHistoryAndProgress';
 import {CommitInfoSidebar} from './CommitInfoView/CommitInfoView';
 import {CommitTreeList} from './CommitTreeList';
@@ -22,7 +23,7 @@ import {GettingStartedModal} from './gettingStarted/GettingStartedModal';
 import {I18nSupport, t, T} from './i18n';
 import platform from './platform';
 import {useMainContentWidth} from './responsive';
-import {repositoryInfo} from './serverAPIState';
+import {applicationinfo, repositoryInfo} from './serverAPIState';
 import {ThemeRoot} from './theme';
 import {ModalContainer} from './useModal';
 import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
@@ -40,6 +41,7 @@ export default function App() {
     <React.StrictMode>
       <I18nSupport>
         <RecoilRoot>
+          <AccessGlobalRecoil />
           <ThemeRoot>
             <ISLCommandContext>
               <ErrorBoundary>
@@ -86,6 +88,7 @@ function ISLDrawers() {
 
 function MainContent() {
   const repoInfo = useRecoilValue(repositoryInfo);
+  useRecoilValue(applicationinfo); // ensure this info is always fetched
 
   const ref = useMainContentWidth();
 

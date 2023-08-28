@@ -19,6 +19,10 @@ use async_trait::async_trait;
 use blobstore::Blobstore;
 use blobstore::BlobstoreGetData;
 use blobstore::BlobstoreIsPresent;
+use blobstore::BlobstorePutOps;
+use blobstore::BlobstoreUnlinkOps;
+use blobstore::OverwriteStatus;
+use blobstore::PutBehaviour;
 use context::CoreContext;
 use mononoke_types::BlobstoreBytes;
 use scuba_ext::MononokeScubaSampleBuilder;
@@ -30,7 +34,6 @@ pub use crate::redaction_config_blobstore::ArcRedactionConfigBlobstore;
 pub use crate::redaction_config_blobstore::RedactionConfigBlobstore;
 pub use crate::store::RedactedBlobs;
 pub use crate::store::RedactedMetadata;
-pub use crate::store::SqlRedactedContentStore;
 
 pub mod config {
     pub const GET_OPERATION: &str = "GET";
@@ -198,7 +201,7 @@ impl<T: Blobstore> RedactedBlobstoreInner<T> {
 }
 
 #[async_trait]
-impl<T: Blobstore> Blobstore for RedactedBlobstoreInner<T> {
+impl<B: Blobstore> Blobstore for RedactedBlobstoreInner<B> {
     async fn get<'a>(
         &'a self,
         ctx: &'a CoreContext,
@@ -239,6 +242,37 @@ impl<T: Blobstore> Blobstore for RedactedBlobstoreInner<T> {
 }
 
 #[async_trait]
+impl<B: BlobstorePutOps> BlobstorePutOps for RedactedBlobstoreInner<B> {
+    async fn put_explicit<'a>(
+        &'a self,
+        ctx: &'a CoreContext,
+        key: String,
+        value: BlobstoreBytes,
+        put_behaviour: PutBehaviour,
+    ) -> Result<OverwriteStatus> {
+        let blobstore = self.access_blobstore(ctx, &key, config::PUT_OPERATION)?;
+        blobstore.put_explicit(ctx, key, value, put_behaviour).await
+    }
+    async fn put_with_status<'a>(
+        &'a self,
+        ctx: &'a CoreContext,
+        key: String,
+        value: BlobstoreBytes,
+    ) -> Result<OverwriteStatus> {
+        let blobstore = self.access_blobstore(ctx, &key, config::PUT_OPERATION)?;
+        blobstore.put_with_status(ctx, key, value).await
+    }
+}
+
+#[async_trait]
+impl<B: BlobstoreUnlinkOps> BlobstoreUnlinkOps for RedactedBlobstoreInner<B> {
+    async fn unlink<'a>(&'a self, ctx: &'a CoreContext, key: &'a str) -> Result<()> {
+        let blobstore = self.access_blobstore(ctx, key, config::PUT_OPERATION)?;
+        blobstore.unlink(ctx, key).await
+    }
+}
+
+#[async_trait]
 impl<B: Blobstore> Blobstore for RedactedBlobstore<B> {
     async fn get<'a>(
         &'a self,
@@ -261,6 +295,36 @@ impl<B: Blobstore> Blobstore for RedactedBlobstore<B> {
         key: &'a str,
     ) -> Result<BlobstoreIsPresent> {
         self.inner.is_present(ctx, key).await
+    }
+}
+
+#[async_trait]
+impl<B: BlobstorePutOps> BlobstorePutOps for RedactedBlobstore<B> {
+    async fn put_explicit<'a>(
+        &'a self,
+        ctx: &'a CoreContext,
+        key: String,
+        value: BlobstoreBytes,
+        put_behaviour: PutBehaviour,
+    ) -> Result<OverwriteStatus> {
+        self.inner
+            .put_explicit(ctx, key, value, put_behaviour)
+            .await
+    }
+    async fn put_with_status<'a>(
+        &'a self,
+        ctx: &'a CoreContext,
+        key: String,
+        value: BlobstoreBytes,
+    ) -> Result<OverwriteStatus> {
+        self.inner.put_with_status(ctx, key, value).await
+    }
+}
+
+#[async_trait]
+impl<B: BlobstoreUnlinkOps> BlobstoreUnlinkOps for RedactedBlobstore<B> {
+    async fn unlink<'a>(&'a self, ctx: &'a CoreContext, key: &'a str) -> Result<()> {
+        self.inner.unlink(ctx, key).await
     }
 }
 
@@ -295,7 +359,7 @@ mod test {
         borrowed!(ctx);
 
         let inner = Memblob::default();
-        let redacted_pairs = RedactedBlobs::FromSql(Arc::new(hashmap! {
+        let redacted_pairs = RedactedBlobs::FromHashMapForTests(Arc::new(hashmap! {
             redacted_key.to_owned() => RedactedMetadata {
                 task: redacted_task.to_owned(),
                 log_only: false,
@@ -356,7 +420,7 @@ mod test {
         borrowed!(ctx);
 
         let inner = Memblob::default();
-        let redacted_pairs = RedactedBlobs::FromSql(Arc::new(hashmap! {
+        let redacted_pairs = RedactedBlobs::FromHashMapForTests(Arc::new(hashmap! {
             redacted_log_only_key.to_owned() => RedactedMetadata {
                 task: redacted_task.to_owned(),
                 log_only: true,

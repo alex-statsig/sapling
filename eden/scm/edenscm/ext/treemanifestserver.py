@@ -173,6 +173,7 @@ from edenscm import (
     registrar,
     repair,
     revlog,
+    revlog2,
     revsetlang,
     scmutil,
     sshserver,
@@ -275,7 +276,7 @@ def usehttpfetching(repo):
 
 def hgupdate(orig, repo, node, quietempty=False, updatecheck=None):
     oldfallbackpath = getattr(repo, "fallbackpath", None)
-    if util.safehasattr(repo, "stickypushpath"):
+    if hasattr(repo, "stickypushpath"):
         repo.fallbackpath = repo.stickypushpath
 
     try:
@@ -315,6 +316,7 @@ def uisetup(ui):
         exchange, "_pullbundle2extraprepare", pullbundle2extraprepare
     )
     extensions.wrapfunction(revlog.revlog, "checkhash", _checkhash)
+    extensions.wrapfunction(revlog2.revlog2, "checkhash", _checkhash)
 
     extensions.wrapfilecache(localrepo.localrepository, "manifestlog", getmanifestlog)
     extensions.wrapfilecache(
@@ -706,7 +708,7 @@ def setuptreestores(repo, mfl):
         mfl.makeruststore()
         return
 
-    if not util.safehasattr(repo, "name"):
+    if not hasattr(repo, "name"):
         repo.name = ui.config("remotefilelog", "reponame", "unknown")
     packpath = shallowutil.getcachepackpath(repo, PACK_CATEGORY)
     _prunesharedpacks(repo, packpath)
@@ -771,7 +773,7 @@ def setuptreestores(repo, mfl):
     ondemandstore.setshared(mfl.datastore, mfl.historystore)
 
 
-class basetreemanifestlog(object):
+class basetreemanifestlog:
     def __init__(self, repo):
         if not useruststore(self._repo.ui):
             self._mutablelocalpacks = mutablestores.pendingmutablepack(
@@ -1076,7 +1078,7 @@ class hybridmanifestlog(manifest.manifestlog):
         self.datastore = self.treemanifestlog.datastore
         self.historystore = self.treemanifestlog.historystore
 
-        if util.safehasattr(self.treemanifestlog, "shareddatastores"):
+        if hasattr(self.treemanifestlog, "shareddatastores"):
             self.shareddatastores = self.treemanifestlog.shareddatastores
             self.localdatastores = self.treemanifestlog.localdatastores
             self.sharedhistorystores = self.treemanifestlog.sharedhistorystores
@@ -1117,13 +1119,13 @@ def _getparenttree(manifestlog, node=None):
     if node is None or node == nullid:
         return None
     tree = manifestlog[node].read()
-    if util.safehasattr(tree, "_treemanifest"):
+    if hasattr(tree, "_treemanifest"):
         # Detect hybrid manifests and unwrap them
         tree = tree._treemanifest()
     return tree
 
 
-class treemanifestctx(object):
+class treemanifestctx:
     def __init__(self, manifestlog, dir, node):
         self._manifestlog = manifestlog
         self._dir = dir
@@ -1191,7 +1193,7 @@ class treemanifestctx(object):
         return self.read().find(key)
 
 
-class memtreemanifestctx(object):
+class memtreemanifestctx:
     def __init__(self, manifestlog, dir=""):
         self._manifestlog = manifestlog
         self._dir = dir
@@ -1246,7 +1248,7 @@ def serverreposetup(repo):
         caps = _addservercaps(repo, caps)
         return caps
 
-    if util.safehasattr(wireproto, "_capabilities"):
+    if hasattr(wireproto, "_capabilities"):
         extensions.wrapfunction(wireproto, "_capabilities", _capabilities)
     else:
         extensions.wrapfunction(wireproto, "capabilities", _capabilities)
@@ -1306,7 +1308,7 @@ def getbundlemanifestlog(orig, self):
     if isinstance(mfl, hybridmanifestlog):
         wrapmfl = mfl.treemanifestlog
 
-    class pendingmempack(object):
+    class pendingmempack:
         def __init__(self):
             self._mutabledpack = None
             self._mutablehpack = None
@@ -1369,7 +1371,7 @@ def _writemanifestwrapper(orig, self, tr, link, p1, p2, added, removed):
 
     mfl = self._manifestlog
     if (
-        util.safehasattr(mfl._revlog.opener, "treemanifestserver")
+        hasattr(mfl._revlog.opener, "treemanifestserver")
         and mfl._revlog.opener.treemanifestserver
     ):
         # Since we're adding the root flat manifest, let's add the corresponding
@@ -1426,7 +1428,7 @@ def backfillmanifestrevlog(ui, repo, *args, **opts):
         remote = conn.peer
 
         # _localrepo is needed for remotefilelog to work
-        if util.safehasattr(remote, "_callstream"):
+        if hasattr(remote, "_callstream"):
             remote._localrepo = repo
 
         cl = repo.changelog
@@ -1671,7 +1673,7 @@ def _unpackmanifestscg1(orig, self, repo, revmap, trp, numchanges):
             linkrev = mfrevlog.linkrev(mfrevlog.rev(mfnode))
             _converttotree(trp, mfl, tmfl, mfl[mfnode], linkrev=linkrev, torevlog=True)
 
-    if util.safehasattr(repo.manifestlog, "datastore") and repo.ui.configbool(
+    if hasattr(repo.manifestlog, "datastore") and repo.ui.configbool(
         "treemanifest", "autocreatetrees"
     ):
 
@@ -1735,7 +1737,7 @@ def _convertdeltatotree(
     mfl.add(mfl.ui, newtree, p1, p2, linknode, overridenode=node, overridep1node=p1)
 
 
-class InterceptedMutableDataPack(object):
+class InterceptedMutableDataPack:
     """This classes intercepts data pack writes and replaces the node for the
     root with the provided node. This is useful for forcing a tree manifest to
     be referencable via its flat hash.
@@ -1755,7 +1757,7 @@ class InterceptedMutableDataPack(object):
         return self._pack.add(name, node, deltabasenode, delta)
 
 
-class InterceptedMutableHistoryPack(object):
+class InterceptedMutableHistoryPack:
     """This classes intercepts history pack writes and replaces the node for the
     root with the provided node. This is useful for forcing a tree manifest to
     be referencable via its flat hash.
@@ -2137,18 +2139,23 @@ def _registerbundle2parts():
         **kwargs,
     ):
         """add parts containing trees being pulled"""
-        if (
-            "True" not in b2caps.get("treemanifest", [])
-            or not treeenabled(repo.ui)
-            or repo.svfs.treemanifestserver
-            or not kwargs.get("cg", True)
-        ):
-            return
-
-        outgoing = exchange._computeoutgoing(repo, heads, common)
-        sendtrees = shallowbundle.cansendtrees(
-            repo, outgoing.missing, bundlecaps=bundlecaps, b2caps=b2caps
-        )
+        # If the client is not shallow, send all trees.
+        client_shallow = "remotefilelog" in b2caps
+        if client_shallow:
+            if (
+                "True" not in b2caps.get("treemanifest", [])
+                or not treeenabled(repo.ui)
+                or repo.svfs.treemanifestserver
+                or not kwargs.get("cg", True)
+            ):
+                return
+            outgoing = exchange._computeoutgoing(repo, heads, common)
+            sendtrees = shallowbundle.cansendtrees(
+                repo, outgoing.missing, bundlecaps=bundlecaps, b2caps=b2caps
+            )
+        else:
+            outgoing = exchange._computeoutgoing(repo, heads, common)
+            sendtrees = shallowbundle.AllTrees
         if sendtrees != shallowbundle.NoTrees:
             try:
                 part = createtreepackpart(
@@ -2202,7 +2209,7 @@ def createtreepackpart(repo, outgoing, partname, sendtrees=shallowbundle.AllTree
 
 
 def getfallbackpath(repo):
-    if util.safehasattr(repo, "fallbackpath"):
+    if hasattr(repo, "fallbackpath"):
         return repo.fallbackpath
     else:
         path = repo.ui.config("paths", "default")
@@ -2822,7 +2829,7 @@ NODEINFOFORMAT = "!20s20s20sI"
 NODEINFOLEN = struct.calcsize(NODEINFOFORMAT)
 
 
-class nodeinfoserializer(object):
+class nodeinfoserializer:
     """Serializer for node info"""
 
     @staticmethod
@@ -2847,7 +2854,7 @@ class nodeinfoserializer(object):
         )
 
 
-class cachestoreserializer(object):
+class cachestoreserializer:
     """Simple serializer that attaches key and sha1 to the content"""
 
     def __init__(self, key):

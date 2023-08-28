@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-#ifdef WIN32
+#ifdef _WIN32
   if (shouldRecordFilesystemSamples(FLAGS_interface)) {
     std::cerr << "Filesystem sha1 not currently supported" << std::endl;
     return 1;
@@ -195,7 +195,7 @@ int main(int argc, char** argv) {
   }
 
   const auto socket_path = repo_path / ".eden" / "socket";
-  const unsigned nthreads = FLAGS_threads;
+  const size_t nthreads = FLAGS_threads;
   // This number should stay a power of two, to avoid cache line ping-ponging
   // on the boundaries.
   const unsigned samples_per_thread = 8192;

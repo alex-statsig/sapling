@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, List, Set, Tuple
 
 from eden.fs.cli import hg_util
-from eden.fs.cli.config import EdenCheckout, EdenInstance
+from eden.fs.cli.config import EdenCheckout, EdenInstance, InProgressCheckoutError
 from eden.fs.cli.doctor.problem import (
     FixableProblem,
     Problem,
@@ -483,6 +483,7 @@ def check_materialized_are_accessible(
             return
 
     case_sensitive = checkout.get_config().case_sensitive
+    windows_symlinks_enabled = checkout.get_config().enable_windows_symlinks
     for materialized_dir in materialized:
         materialized_name = os.fsdecode(materialized_dir.path)
         path = Path(materialized_name)
@@ -534,8 +535,8 @@ def check_materialized_are_accessible(
 
                 if sys.platform == "win32":
                     if stat.S_ISLNK(dirent_mode):
-                        # TODO(xavierd): Symlinks are for now recognized as files.
-                        dirent_mode = stat.S_IFREG
+                        if not windows_symlinks_enabled:
+                            dirent_mode = stat.S_IFREG
                     elif stat.S_ISDIR(dirent_mode):
                         # Python considers junctions as directory.
                         import ctypes
@@ -840,16 +841,26 @@ def get_hg_diff(checkout: EdenCheckout) -> Set[Path]:
 def check_hg_status_match_hg_diff(
     tracker: ProblemTracker, instance: EdenInstance, checkout: EdenCheckout
 ) -> None:
-    modified_files = get_modified_files(instance, checkout)
+    try:
+        modified_files = get_modified_files(instance, checkout)
+    except InProgressCheckoutError:
+        return
+
     if len(modified_files) == 0:
         return
 
-    diff = get_hg_diff(checkout)
+    try:
+        diff = get_hg_diff(checkout)
+    except subprocess.CalledProcessError:
+        return
 
-    # Bail out if status changed while running `hg diff` as it is
-    # guaranteed that the working copy was modified, thus this doctor
-    # checker would raise a Problem
-    if modified_files != get_modified_files(instance, checkout):
+    try:
+        # Bail out if status changed while running `hg diff` as it is
+        # guaranteed that the working copy was modified, thus this doctor
+        # checker would raise a Problem
+        if modified_files != get_modified_files(instance, checkout):
+            return
+    except InProgressCheckoutError:
         return
 
     mismatched_files = []

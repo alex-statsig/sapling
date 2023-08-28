@@ -542,7 +542,7 @@ methods = {
 }
 
 
-class matchctx(object):
+class matchctx:
     def __init__(self, ctx, subset, status=None):
         self.ctx = ctx
         assert isinstance(subset, (fullsubset, listsubset))
@@ -571,7 +571,8 @@ class matchctx(object):
         return [f for f in files if f in self.subset]
 
     def existing(self):
-        assert self._existingenabled, "unexpected existing() invocation"
+        if not self._existingenabled:
+            raise error.ProgrammingError("unexpected existing() invocation")
         if self._status is not None:
             removed = set(self._status[3])
             unknown = set(self._status[4] + self._status[5])
@@ -700,21 +701,24 @@ def _buildstatus(ctx, tree, basectx=None):
 
     # temporaty boolean to simplify the next conditional
     purewdir = ctx.rev() is None and basectx is None
+    statuscaller = _intree(_statuscallers, tree)
+    existingcaller = purewdir and _intree(_existingcallers, tree)
 
     if (
-        _intree(_statuscallers, tree)
+        statuscaller
         or
         # Using matchctx.existing() on a workingctx requires us to check
         # for deleted files.
-        (purewdir and _intree(_existingcallers, tree))
+        existingcaller
     ):
         unknown = _intree(["unknown"], tree)
         ignored = _intree(["ignored"], tree)
+        clean = existingcaller or _intree(["clean"], tree)
 
         r = ctx.repo()
         if basectx is None:
             basectx = ctx.p1()
-        return r.status(basectx, ctx, unknown=unknown, ignored=ignored, clean=True)
+        return r.status(basectx, ctx, unknown=unknown, ignored=ignored, clean=clean)
     else:
         return None
 

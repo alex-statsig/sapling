@@ -174,7 +174,7 @@ TEST(EdenMount, getTreeOrTreeEntry) {
     auto& treeEntry = std::get<TreeEntry>(variant);
     EXPECT_EQ(treeEntry.getType(), TreeEntryType::REGULAR_FILE);
     auto& storedBlob = builder.getStoredBlob("src/test.c"_relpath)->get();
-    EXPECT_EQ(treeEntry.getHash(), storedBlob.getHash());
+    EXPECT_EQ("testy tests", storedBlob.getContents().to<std::string>());
   }
 
   {
@@ -920,7 +920,11 @@ TEST(EdenMount, unmountWaitsForInProgressMountBeforeUnmounting) {
 
   EXPECT_FALSE(mountDelegate->wasFuseUnmountEverCalled())
       << "unmount should not call fuseUnmount until fuseMount completes";
-  ASSERT_FALSE(unmountFuture.wait(kMicroTimeout).isReady())
+
+  auto newUnmountFuture =
+      std::move(unmountFuture).via(testMount.getServerExecutor().get());
+  testMount.drainServerExecutor();
+  ASSERT_FALSE(newUnmountFuture.isReady())
       << "unmount should not finish until fuseMount completes";
 
   auto fuse = std::make_shared<FakeFuse>();
@@ -930,7 +934,7 @@ TEST(EdenMount, unmountWaitsForInProgressMountBeforeUnmounting) {
     std::move(startChannelFuture).within(kTimeout).get();
   } catch (FuseDeviceUnmountedDuringInitialization&) {
   }
-  std::move(unmountFuture).get(kTimeout);
+  std::move(newUnmountFuture).get(kTimeout);
   EXPECT_TRUE(mountDelegate->wasFuseUnmountEverCalled())
       << "fuseUnmount should be called after fuseMount completes";
 }

@@ -68,7 +68,7 @@ slowstatuswarning = _(
 )
 
 
-class basectx(object):
+class basectx:
     """A basectx object represents the common logic for its children:
     changectx: read-only context that is already present in the repo,
     workingctx: a context that represents the working directory and can
@@ -310,7 +310,6 @@ class basectx(object):
         exclude=None,
         default="glob",
         badfn=None,
-        emptyalways=True,
         warn=None,
     ):
         r = self._repo
@@ -321,10 +320,8 @@ class basectx(object):
             include,
             exclude,
             default,
-            auditor=r.nofsauditor,
             ctx=self,
             badfn=badfn,
-            emptyalways=emptyalways,
             warn=warn,
         )
 
@@ -721,7 +718,7 @@ class changectx(basectx):
         return self.walk(match)
 
 
-class basefilectx(object):
+class basefilectx:
     """A filecontext object represents the common logic for its children:
     filectx: read-only access to a filerevision that is already present
              in the repo,
@@ -925,12 +922,9 @@ class basefilectx(object):
 
         if (
             fctx._filenode is None
-            and (
-                self._repo._encodefilterpats
-                # if file data starts with '\1\n', empty metadata block is
-                # prepended, which adds 4 bytes to filelog.size().
-                or self.size() - 4 == fctx.size()
-            )
+            # if file data starts with '\1\n', empty metadata block is
+            # prepended, which adds 4 bytes to filelog.size().
+            and self.size() - 4 == fctx.size()
             or self.size() == fctx.size()
         ):
             if self._filenode is None:
@@ -1203,13 +1197,6 @@ class basefilectx(object):
             c = visit.pop(max(visit))
             yield c
 
-    def decodeddata(self):
-        """Returns `data()` after running repository decoding filters.
-
-        This is often equivalent to how the data would be expressed on disk.
-        """
-        return self._repo.wwritedata(self.path(), self.data())
-
 
 def _filelogbaseparents(
     fctx: basefilectx, follow: bool
@@ -1342,7 +1329,7 @@ class pathhistoryparents:
         raise error.ProgrammingError("%s is not yet follow()-ed" % hex(node))
 
 
-class annotateline(object):
+class annotateline:
     def __init__(self, fctx=None, ctx=None, lineno=None, path=None):
         if (not fctx) == (not ctx):
             raise error.ProgrammingError("must specify exactly one of ctx or fctx")
@@ -1894,7 +1881,6 @@ class workingctx(committablectx):
         exclude=None,
         default="glob",
         badfn=None,
-        emptyalways=True,
         warn=None,
     ):
         r = self._repo
@@ -1909,11 +1895,9 @@ class workingctx(committablectx):
             include,
             exclude,
             default,
-            auditor=r.auditor,
             ctx=self,
             badfn=badfn,
             icasefs=icasefs,
-            emptyalways=emptyalways,
             warn=warn,
         )
 
@@ -3118,7 +3102,7 @@ class overlayfilectx(committablefilectx):
             # copy extra fields from originalfctx
             attrs = ["rawdata", "rawflags", "_filenode", "_filerev"]
             for attr_ in attrs:
-                if util.safehasattr(originalfctx, attr_):
+                if hasattr(originalfctx, attr_):
                     setattr(self, attr_, getattr(originalfctx, attr_))
 
     def data(self):
@@ -3243,7 +3227,7 @@ class metadataonlyctx(committablectx):
         return scmutil.status(modified, added, removed, [], [], [], [])
 
 
-class arbitraryfilectx(object):
+class arbitraryfilectx:
     """Allows you to use filectx-like functions on a file in an arbitrary
     location on disk, possibly not in the working directory.
     """
@@ -3277,10 +3261,6 @@ class arbitraryfilectx(object):
 
     def content_sha256(self):
         return hashlib.sha256(self.data()).digest()
-
-    def decodeddata(self):
-        with open(self._path, "rb") as f:
-            return f.read()
 
     def remove(self):
         util.unlink(self._path)

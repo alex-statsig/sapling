@@ -34,8 +34,7 @@ TEST(GitBlob, testDeserializeUnmanaged) {
       << "SHA-1 of contents should match key";
 
   IOBuf buf(IOBuf::WRAP_BUFFER, gitBlobObject);
-  auto blob = deserializeGitBlob(hash, &buf);
-  EXPECT_EQ(hash, blob->getHash());
+  auto blob = deserializeGitBlob(&buf);
   EXPECT_FALSE(blob->getContents().isShared())
       << "deserializeGitBlob() must make a copy of the buffer given "
       << "an unmanaged IOBuf as input";
@@ -63,8 +62,7 @@ TEST(GitBlob, testDeserializeManaged) {
   // Sanity check that we are the only user of the newly-created IOBuf
   EXPECT_FALSE(buf->isShared()) << "newly created IOBuf should not be shared";
 
-  auto blob = deserializeGitBlob(hash, buf.get());
-  EXPECT_EQ(hash, blob->getHash());
+  auto blob = deserializeGitBlob(buf.get());
   EXPECT_TRUE(buf->isShared())
       << "deserializeGitBlob() should return a blob that shares the same "
       << "IOBuf data, instead of copying it";

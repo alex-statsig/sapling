@@ -9,23 +9,13 @@ import type {TypeaheadKind, TypeaheadResult} from './types';
 
 import serverApi from '../ClientToServerAPI';
 import {Subtle} from '../Subtle';
+import {recentReviewers, SuggestedReviewers} from './SuggestedReviewers';
+import {extractTokens, TokensList, tokensToString} from './Tokens';
 import {getInnerTextareaForVSCodeTextArea} from './utils';
-import {VSCodeButton, VSCodeTextField} from '@vscode/webview-ui-toolkit/react';
+import {VSCodeTextField} from '@vscode/webview-ui-toolkit/react';
 import {useRef, useEffect, useState} from 'react';
 import {Icon} from 'shared/Icon';
 import {randomId} from 'shared/utils';
-
-/** Extract comma-separated tokens into an array, plus any remaining non-tokenized text */
-function extractTokens(raw: string): [Array<string>, string] {
-  const tokens = raw.split(',');
-  const remaining = tokens.length === 0 ? raw : tokens.pop();
-  return [tokens.map(token => token.trim()), remaining ?? ''];
-}
-
-/** Combine tokens back into a string to be stored in the commit message */
-function tokensToString(tokens: Array<string>, remaining: string): string {
-  return tokens.length === 0 ? remaining : tokens.join(',') + ',' + remaining;
-}
 
 export function CommitInfoTextField({
   name,
@@ -33,12 +23,14 @@ export function CommitInfoTextField({
   editedMessage,
   setEditedCommitMessage,
   typeaheadKind,
+  maxTokens,
 }: {
   name: string;
   autoFocus: boolean;
   editedMessage: string;
   setEditedCommitMessage: (fieldValue: string) => unknown;
   typeaheadKind: TypeaheadKind;
+  maxTokens?: number;
 }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -72,6 +64,8 @@ export function CommitInfoTextField({
 
   const fieldKey = name.toLowerCase().replace(/\s/g, '-');
 
+  const isReviewers = fieldKey === 'reviewers';
+
   const saveNewValue = (value: string | undefined) => {
     if (value) {
       setEditedCommitMessage(
@@ -83,93 +77,98 @@ export function CommitInfoTextField({
       );
       // clear out typeahead
       setTypeaheadSuggestions({type: 'success', values: [], timestamp: Date.now()});
+
+      // save as recent reviewer, if applicable
+      if (isReviewers) {
+        recentReviewers.useReviewer(value);
+      }
     }
   };
 
   return (
-    <div
-      className="commit-info-tokenized-field"
-      onKeyDown={event => {
-        if (
-          event.key === 'Backspace' &&
-          (ref.current as HTMLInputElement | null)?.value.length === 0
-        ) {
-          // pop one token off
-          setEditedCommitMessage(tokensToString(tokens.slice(0, -1), ''));
-          return;
-        }
+    <>
+      <div
+        className="commit-info-tokenized-field"
+        onKeyDown={event => {
+          if (
+            event.key === 'Backspace' &&
+            (ref.current as HTMLInputElement | null)?.value.length === 0
+          ) {
+            // pop one token off
+            setEditedCommitMessage(tokensToString(tokens.slice(0, -1), ''));
+            return;
+          }
 
-        const values = (typeaheadSuggestions as TypeaheadSuggestions & {type: 'success'})?.values;
-        if (values == null) {
-          return;
-        }
+          const values = (typeaheadSuggestions as TypeaheadSuggestions & {type: 'success'})?.values;
+          if (values == null) {
+            return;
+          }
 
-        if (event.key === 'ArrowDown') {
-          setSelectedIndex(last => Math.min(last + 1, values.length - 1));
-          event.preventDefault();
-        } else if (event.key === 'ArrowUp') {
-          // allow -1, so you can up arrow "above" the top, to make it highlight nothing
-          setSelectedIndex(last => Math.max(last - 1, -1));
-          event.preventDefault();
-        } else if (event.key === 'Enter') {
-          saveNewValue(values[selectedSuggestionIndex].value);
-        }
-      }}>
-      {tokens
-        .filter(token => token != '')
-        .map((token, i) => (
-          <span key={i} className="token">
-            {token}
-            <VSCodeButton
-              appearance="icon"
-              onClick={() => {
-                setEditedCommitMessage(
-                  tokensToString(
-                    tokens.filter(t => t !== token),
-                    // keep anything already typed in
-                    (ref.current as HTMLInputElement | null)?.value ?? '',
-                  ),
-                );
-              }}>
-              <Icon icon="x" />
-            </VSCodeButton>
-          </span>
-        ))}
-      <div className="commit-info-field-with-typeahead">
-        <VSCodeTextField
-          ref={ref}
-          value={remaining}
-          data-testid={`commit-info-${fieldKey}-field`}
-          onInput={onInput}
+          if (event.key === 'ArrowDown') {
+            setSelectedIndex(last => Math.min(last + 1, values.length - 1));
+            event.preventDefault();
+          } else if (event.key === 'ArrowUp') {
+            // allow -1, so you can up arrow "above" the top, to make it highlight nothing
+            setSelectedIndex(last => Math.max(last - 1, -1));
+            event.preventDefault();
+          } else if (event.key === 'Enter') {
+            saveNewValue(values[selectedSuggestionIndex].value);
+          }
+        }}>
+        <TokensList
+          tokens={tokens}
+          onClickX={(token: string) => {
+            setEditedCommitMessage(
+              tokensToString(
+                tokens.filter(t => t !== token),
+                // keep anything already typed in
+                (ref.current as HTMLInputElement | null)?.value ?? '',
+              ),
+            );
+          }}
         />
-        {typeaheadSuggestions?.type === 'loading' ||
-        (typeaheadSuggestions?.values?.length ?? 0) > 0 ? (
-          <div className="typeahead-suggestions tooltip tooltip-bottom">
-            <div className="tooltip-arrow tooltip-arrow-bottom" />
-            {typeaheadSuggestions?.type === 'loading' ? (
-              <Icon icon="loading" />
-            ) : (
-              typeaheadSuggestions?.values.map((suggestion, index) => (
-                <span
-                  key={suggestion.value}
-                  className={
-                    'suggestion' + (index === selectedSuggestionIndex ? ' selected-suggestion' : '')
-                  }
-                  onMouseDown={() => {
-                    saveNewValue(suggestion.value);
-                  }}>
-                  {suggestion.image && <ImageWithFallback src={suggestion.image} />}
-                  <span className="suggestion-label">
-                    <span>{suggestion.label}</span>
-                    {suggestion.label !== suggestion.value && <Subtle>{suggestion.value}</Subtle>}
-                  </span>
-                </span>
-              ))
-            )}
+        {tokens.length >= (maxTokens ?? Infinity) ? null : (
+          <div className="commit-info-field-with-typeahead">
+            <VSCodeTextField
+              ref={ref}
+              value={remaining}
+              data-testid={`commit-info-${fieldKey}-field`}
+              onInput={onInput}
+            />
+            {typeaheadSuggestions?.type === 'loading' ||
+            (typeaheadSuggestions?.values?.length ?? 0) > 0 ? (
+              <div className="typeahead-suggestions tooltip tooltip-bottom">
+                <div className="tooltip-arrow tooltip-arrow-bottom" />
+                {typeaheadSuggestions?.type === 'loading' ? (
+                  <Icon icon="loading" />
+                ) : (
+                  typeaheadSuggestions?.values.map((suggestion, index) => (
+                    <span
+                      key={suggestion.value}
+                      className={
+                        'suggestion' +
+                        (index === selectedSuggestionIndex ? ' selected-suggestion' : '')
+                      }
+                      onMouseDown={() => {
+                        saveNewValue(suggestion.value);
+                      }}>
+                      {suggestion.image && <ImageWithFallback src={suggestion.image} />}
+                      <span className="suggestion-label">
+                        <span>{suggestion.label}</span>
+                        {suggestion.label !== suggestion.value && (
+                          <Subtle>{suggestion.value}</Subtle>
+                        )}
+                      </span>
+                    </span>
+                  ))
+                )}
+              </div>
+            ) : null}
           </div>
-        ) : null}
+        )}
       </div>
-    </div>
+      {isReviewers && <SuggestedReviewers existingReviewers={tokens} addReviewer={saveNewValue} />}
+    </>
   );
 }
 

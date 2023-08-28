@@ -82,7 +82,7 @@ def addbranchrevs(lrepo, other, branches, revs):
     hashbranch, branches = branches
     if not hashbranch and not branches:
         x = revs or None
-        if util.safehasattr(revs, "first"):
+        if hasattr(revs, "first"):
             y = revs.first()
         elif revs:
             y = revs[0]
@@ -151,7 +151,7 @@ def _peerlookup(path):
     except TypeError:
         # we can't test callable(thing) because 'thing' can be an unloaded
         # module that implements __call__
-        if not util.safehasattr(thing, "instance"):
+        if not hasattr(thing, "instance"):
             raise
         return thing
 
@@ -313,6 +313,10 @@ def share(
 
     r = repository(ui, destwvfs.base)
     postshare(srcrepo, r, bookmarks=bookmarks, defaultpath=defaultpath)
+
+    # Reload repo so Rust repo picks up paths.default.
+    r = repository(ui, destwvfs.base)
+
     _postshareupdate(r, update, checkout=checkout)
     return r
 
@@ -509,11 +513,15 @@ def clone(
         cleanup_path = os.path.join(dest, ui.identity.dotdir())
 
     with bindings.atexit.AtExit.rmtree(cleanup_path) as atexit_rmtree:
+        config_overrides = {}
+        if shallow:
+            config_overrides[("format", "use-remotefilelog")] = "true"
         # Create the destination repo before we even open the connection to the
         # source, so we can use any repo-specific configuration for the connection.
         try:
             # Note: This triggers hgrc.dynamic generation with empty repo hgrc.
-            destpeer = repository(ui, dest, create=True)
+            with ui.configoverride(config_overrides):
+                destpeer = repository(ui, dest, create=True)
         except OSError as inst:
             if inst.errno == errno.EEXIST:
                 raise error.Abort(_("destination '%s' already exists") % dest)
@@ -540,21 +548,15 @@ def clone(
             destrepo.ui.reloadconfigs(destrepo.root)
 
             if shallow:
-                from edenscm.ext.remotefilelog.shallowrepo import requirement
-
-                if requirement not in destrepo.requirements:
-                    with destrepo.lock():
-                        destrepo.requirements.add(requirement)
-                        destrepo._writerequirements()
-                    # Reopen the repo so reposetup in extensions can see the added
-                    # requirement.
-                    # To keep command line config overrides, reuse the ui from the
-                    # old repo object. A cleaner way might be figuring out the
-                    # overrides and then set them, in case extensions changes the
-                    # class of the ui object.
-                    origui = destrepo.ui
-                    destrepo = repository(ui, dest)
-                    destrepo.ui = origui
+                # Reopen the repo so reposetup in extensions can see the added
+                # requirement.
+                # To keep command line config overrides, reuse the ui from the
+                # old repo object. A cleaner way might be figuring out the
+                # overrides and then set them, in case extensions changes the
+                # class of the ui object.
+                origui = destrepo.ui
+                destrepo = repository(ui, dest)
+                destrepo.ui = origui
 
         # Construct the srcpeer after the destpeer, so we can use the destrepo.ui
         # configs.
@@ -1029,7 +1031,7 @@ def merge(
 def remoteui(src, opts):
     "build a remote ui from ui or repo and opts"
 
-    if util.safehasattr(src, "ui"):  # looks like a repository
+    if hasattr(src, "ui"):  # looks like a repository
         # drop repo-specific config
         dst = src.ui.copywithoutrepo()
         # to copy target options from repo
@@ -1082,7 +1084,7 @@ foi = [
 ]
 
 
-class cachedlocalrepo(object):
+class cachedlocalrepo:
     """Holds a localrepository that can be cached and reused."""
 
     def __init__(self, repo):

@@ -5,8 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import type {CommitTreeWithPreviews} from './getCommitTree';
-import type {Hash} from './types';
+import type {UICodeReviewProvider} from './codeReview/UICodeReviewProvider';
+import type {CommitTree, CommitTreeWithPreviews} from './getCommitTree';
+import type {CommitInfo, DiffSummary, Hash} from './types';
 import type {ContextMenuItem} from 'shared/ContextMenu';
 
 import {BranchIndicator} from './BranchIndicator';
@@ -15,6 +16,7 @@ import {Commit} from './Commit';
 import {Center, FlexRow, LargeSpinner} from './ComponentUtils';
 import {ErrorNotice} from './ErrorNotice';
 import {HighlightCommitsWhileHovering} from './HighlightedCommits';
+import {OperationDisabledButton} from './OperationDisabledButton';
 import {StackEditIcon} from './StackEditIcon';
 import {StackEditSubTree, UndoDescription} from './StackEditSubTree';
 import {Tooltip, DOCUMENTATION_DELAY} from './Tooltip';
@@ -22,6 +24,7 @@ import {allDiffSummaries, codeReviewProvider, pageVisibility} from './codeReview
 import {isTreeLinear, walkTreePostorder} from './getCommitTree';
 import {T, t} from './i18n';
 import {CreateEmptyInitialCommitOperation} from './operations/CreateEmptyInitialCommitOperation';
+import {HideOperation} from './operations/HideOperation';
 import {ImportStackOperation} from './operations/ImportStackOperation';
 import {treeWithPreviews, useMarkOperationsCompleted} from './previews';
 import {useArrowKeysToChangeSelection} from './selection';
@@ -45,7 +48,7 @@ import {ErrorShortMessages} from 'isl-server/src/constants';
 import {useRecoilState, useRecoilValue, useSetRecoilState} from 'recoil';
 import {useContextMenu} from 'shared/ContextMenu';
 import {Icon} from 'shared/Icon';
-import {generatorContains, notEmpty} from 'shared/utils';
+import {generatorContains, notEmpty, unwrap} from 'shared/utils';
 
 import './CommitTreeList.css';
 
@@ -70,19 +73,36 @@ export function CommitTreeList() {
   ) : (
     <>
       {fetchError ? <CommitFetchError error={fetchError} /> : null}
-      <div
-        className="commit-tree-root commit-group with-vertical-line"
-        data-testid="commit-tree-root">
-        <MainLineEllipsis />
-        {trees.map(tree => (
-          <SubTree key={tree.info.hash} tree={tree} depth={0} />
-        ))}
-        <MainLineEllipsis>
-          <FetchingAdditionalCommitsButton />
-          <FetchingAdditionalCommitsIndicator />
-        </MainLineEllipsis>
-      </div>
+      {trees.length === 0 ? null : (
+        <div
+          className="commit-tree-root commit-group with-vertical-line"
+          data-testid="commit-tree-root">
+          <MainLineEllipsis />
+          {trees.filter(shouldShowPublicCommit).map(tree => (
+            <SubTree key={tree.info.hash} tree={tree} depth={0} />
+          ))}
+          <MainLineEllipsis>
+            <FetchingAdditionalCommitsButton />
+            <FetchingAdditionalCommitsIndicator />
+          </MainLineEllipsis>
+        </div>
+      )}
     </>
+  );
+}
+
+/**
+ * Ensure only relevant public commits are shown.
+ * `sl log` does this kind of filtering for us anyway, but
+ * if a commit is hidden due to previews or optimistic state,
+ * we can violate these conditions.
+ */
+function shouldShowPublicCommit(tree: CommitTree) {
+  return (
+    tree.children.length > 0 ||
+    tree.info.bookmarks.length > 0 ||
+    tree.info.remoteBookmarks.length > 0 ||
+    (tree.info.stableCommitMetadata?.length ?? 0) > 0
   );
 }
 
@@ -223,6 +243,30 @@ function FetchingAdditionalCommitsButton() {
   );
 }
 
+function isStackEligibleForCleanup(
+  tree: CommitTreeWithPreviews,
+  diffMap: Map<string, DiffSummary>,
+  provider: UICodeReviewProvider,
+): boolean {
+  if (
+    tree.info.diffId == null ||
+    tree.info.isHead || // don't allow hiding a stack you're checked out on
+    diffMap.get(tree.info.diffId) == null ||
+    !provider.isDiffEligibleForCleanup(unwrap(diffMap.get(tree.info.diffId)))
+  ) {
+    return false;
+  }
+
+  // any child not eligible -> don't show
+  for (const subtree of tree.children) {
+    if (!isStackEligibleForCleanup(subtree, diffMap, provider)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElement | null {
   const reviewProvider = useRecoilValue(codeReviewProvider);
   const diffMap = useRecoilValue(allDiffSummaries);
@@ -241,6 +285,11 @@ function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElemen
     loadingState.state === 'hasValue' &&
     generatorContains(walkTreePostorder([tree]), v => stackHashes.has(v.info.hash));
 
+  const showCleanupButton =
+    reviewProvider == null || diffMap?.value == null
+      ? false
+      : isStackEligibleForCleanup(tree, diffMap.value, reviewProvider);
+
   const contextMenu = useContextMenu(() => moreActions);
   if (reviewProvider !== null && !isStackEditingActivated) {
     const reviewActions =
@@ -256,14 +305,15 @@ function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElemen
     ) {
       actions.push(
         <HighlightCommitsWhileHovering key="resubmit-stack" toHighlight={resubmittableStack}>
-          <VSCodeButton
+          <OperationDisabledButton
+            contextKey="submit-stack"
             appearance="icon"
-            onClick={() => {
-              runOperation(reviewProvider.submitOperation(resubmittableStack));
+            icon={<Icon icon="cloud-upload" slot="start" />}
+            runOperation={() => {
+              return reviewProvider.submitOperation(resubmittableStack);
             }}>
-            <Icon icon="cloud-upload" slot="start" />
             <T>Resubmit stack</T>
-          </VSCodeButton>
+          </OperationDisabledButton>
         </HighlightCommitsWhileHovering>,
       );
       //     any non-submitted diffs -> "submit all commits this stack" in hidden group
@@ -296,14 +346,15 @@ function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElemen
       // NO existing diffs -> show submit stack ()
       actions.push(
         <HighlightCommitsWhileHovering key="submit-stack" toHighlight={submittableStack}>
-          <VSCodeButton
+          <OperationDisabledButton
+            contextKey="submit-stack"
             appearance="icon"
-            onClick={() => {
-              runOperation(reviewProvider.submitOperation(submittableStack));
+            icon={<Icon icon="cloud-upload" slot="start" />}
+            runOperation={() => {
+              return reviewProvider.submitOperation(submittableStack);
             }}>
-            <Icon icon="cloud-upload" slot="start" />
             <T>Submit stack</T>
-          </VSCodeButton>
+          </OperationDisabledButton>
         </HighlightCommitsWhileHovering>,
       );
     }
@@ -311,6 +362,12 @@ function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElemen
 
   if (tree.children.length > 0) {
     actions.push(<StackEditButton key="edit-stack" tree={tree} />);
+  }
+
+  if (showCleanupButton) {
+    actions.push(
+      <CleanupButton key="cleanup" commit={tree.info} hasChildren={tree.children.length > 0} />,
+    );
   }
 
   if (actions.length === 0) {
@@ -327,6 +384,28 @@ function StackActions({tree}: {tree: CommitTreeWithPreviews}): React.ReactElemen
       {actions}
       {moreActionsButton}
     </div>
+  );
+}
+
+function CleanupButton({commit, hasChildren}: {commit: CommitInfo; hasChildren: boolean}) {
+  const runOperation = useRunOperation();
+  return (
+    <Tooltip
+      title={
+        hasChildren
+          ? t('You can safely "clean up" by hiding this stack of commits.')
+          : t('You can safely "clean up" by hiding this commit.')
+      }
+      placement="bottom">
+      <VSCodeButton
+        appearance="icon"
+        onClick={() => {
+          runOperation(new HideOperation(commit.hash));
+        }}>
+        <Icon icon="eye-closed" slot="start" />
+        {hasChildren ? <T>Clean up stack</T> : <T>Clean up</T>}
+      </VSCodeButton>
+    </Tooltip>
   );
 }
 

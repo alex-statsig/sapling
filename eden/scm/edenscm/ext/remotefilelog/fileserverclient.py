@@ -58,7 +58,7 @@ def peersetup(ui, peer):
                 return
             if "remotefilelog" not in shallowutil.peercapabilities(self):
                 return
-            if not util.safehasattr(self, "_localrepo"):
+            if not hasattr(self, "_localrepo"):
                 return
             if constants.REQUIREMENT not in self._localrepo.requirements:
                 return
@@ -94,7 +94,7 @@ def peersetup(ui, peer):
     peer.__class__ = remotefilepeer
 
 
-class getpackclient(object):
+class getpackclient:
     def __init__(self, repo):
         self.repo = repo
         self.ui = repo.ui
@@ -204,7 +204,7 @@ class getpackclient(object):
             raise
 
 
-class fileserverclient(object):
+class fileserverclient:
     """A client for requesting files from the remote file server."""
 
     def __init__(self, repo):
@@ -259,7 +259,7 @@ class fileserverclient(object):
 
     @perftrace.tracefunc("LFS Prefetch")
     def _lfsprefetch(self, fileids):
-        if not _lfsmod or not util.safehasattr(self.repo.svfs, "lfslocalblobstore"):
+        if not _lfsmod or not hasattr(self.repo.svfs, "lfslocalblobstore"):
             return
         if not _lfsmod.wrapper.candownload(self.repo):
             return

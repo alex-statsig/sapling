@@ -10,8 +10,7 @@
 #include <tuple>
 #include "eden/fs/inodes/FsChannel.h"
 #include "eden/fs/nfs/Mountd.h"
-#include "eden/fs/nfs/Nfsd3.h"
-#include "eden/fs/nfs/portmap/Rpcbindd.h"
+#include "eden/fs/nfs/rpc/RpcServer.h"
 #include "eden/fs/utils/CaseSensitivity.h"
 
 namespace folly {
@@ -20,8 +19,13 @@ class Executor;
 
 namespace facebook::eden {
 
+class FsEventLogger;
 class Notifier;
+class NfsDispatcher;
 class ProcessNameCache;
+class PrivHelper;
+class Rpcbindd;
+class Nfsd3;
 
 class NfsServer {
  public:
@@ -38,6 +42,7 @@ class NfsServer {
    * of its own mount point which greatly simplifies it.
    */
   NfsServer(
+      PrivHelper* privHelper,
       folly::EventBase* evb,
       uint64_t numServicingThreads,
       uint64_t maxInflightRequests,
@@ -103,6 +108,9 @@ class NfsServer {
     return evb_;
   }
 
+  /**
+   * Must be called on the NfsServer's EventBase.
+   */
   folly::SemiFuture<folly::File> takeoverStop();
 
   NfsServer(const NfsServer&) = delete;
@@ -111,6 +119,7 @@ class NfsServer {
   NfsServer& operator=(NfsServer&&) = delete;
 
  private:
+  PrivHelper* const privHelper_;
   folly::EventBase* evb_;
   std::shared_ptr<folly::Executor> threadPool_;
   std::shared_ptr<Rpcbindd> rpcbindd_;

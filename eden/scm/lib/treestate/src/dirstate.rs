@@ -7,11 +7,16 @@
 
 //! Directory State.
 
-use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use anyhow::anyhow;
+use anyhow::Context;
 use anyhow::Result;
+use repolock::LockError;
+use repolock::RepoLockHandle;
 use repolock::RepoLocker;
 use types::hgid::NULL_ID;
 use types::HgId;
@@ -38,14 +43,20 @@ pub struct TreeStateFields {
     pub repack_threshold: Option<u64>,
 }
 
-pub fn flush(root: &Path, treestate: &mut TreeState, locker: &RepoLocker) -> Result<()> {
+pub fn flush(
+    root: &Path,
+    treestate: &mut TreeState,
+    locker: &RepoLocker,
+    write_time: Option<i64>,
+    lock_timeout_secs: Option<u32>,
+) -> Result<()> {
     if treestate.dirty() {
         tracing::debug!("flushing dirty treestate");
         let id = identity::must_sniff_dir(root)?;
         let dot_dir = root.join(id.dot_dir());
         let dirstate_path = dot_dir.join("dirstate");
 
-        let _lock = locker.lock_working_copy(dot_dir.clone())?;
+        let _lock = wait_for_wc_lock(dot_dir, locker, lock_timeout_secs)?;
 
         let dirstate_input = util::file::read(&dirstate_path)?;
         let mut dirstate = Dirstate::deserialize(&mut dirstate_input.as_slice())?;
@@ -80,18 +91,65 @@ pub fn flush(root: &Path, treestate: &mut TreeState, locker: &RepoLocker) -> Res
             )
         })?;
 
+        let mut dirstate_file = util::file::atomic_open(&dirstate_path)?;
+
+        let write_time = match write_time {
+            Some(t) => t,
+            None => dirstate_file
+                .as_file()
+                .metadata()?
+                .modified()?
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_secs()
+                .try_into()?,
+        };
+
+        // Invalidate entries with mtime >= now so we can notice size preserving
+        // edits to files in the same second the dirstate is written (and wlock is released).
+        treestate
+            .invalidate_mtime(write_time.try_into()?)
+            .context("error invalidating dirstate mtime")?;
+
         let root_id = treestate.flush()?;
         treestate_fields.tree_filename = treestate.file_name()?;
         treestate_fields.tree_root_id = root_id;
 
-        let mut dirstate_output: Vec<u8> = Vec::new();
-        dirstate.serialize(&mut dirstate_output).unwrap();
-        util::file::atomic_write(&dirstate_path, |file| file.write_all(&dirstate_output))
-            .map_err(|e| anyhow!(e))
-            .map(|_| ())
+        dirstate.serialize(dirstate_file.as_file())?;
+        dirstate_file.save()?;
+
+        Ok(())
     } else {
         tracing::debug!("skipping treestate flush - it is not dirty");
         Ok(())
+    }
+}
+
+pub fn wait_for_wc_lock(
+    wc_dot_hg: PathBuf,
+    locker: &RepoLocker,
+    timeout_secs: Option<u32>,
+) -> anyhow::Result<RepoLockHandle> {
+    let mut timeout = match timeout_secs {
+        None => return Ok(locker.lock_working_copy(wc_dot_hg)?),
+        Some(timeout) => timeout,
+    };
+
+    loop {
+        match locker.try_lock_working_copy(wc_dot_hg.clone()) {
+            Ok(lock) => return Ok(lock),
+            Err(err) => match err {
+                LockError::Contended(_) => {
+                    if timeout == 0 {
+                        return Err(ErrorKind::LockTimeout.into());
+                    }
+
+                    timeout -= 1;
+
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                _ => return Err(err.into()),
+            },
+        }
     }
 }
 

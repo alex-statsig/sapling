@@ -13,8 +13,8 @@ pub fn setup() {
     const UPDATE: &str = "INSTA_UPDATE";
     if std::env::var(WORKSPACE).is_err() {
         let mut root = std::path::PathBuf::from(file!());
-        root.pop();
-        root.pop();
+        assert!(root.pop());
+        assert!(root.pop());
         std::env::set_var(WORKSPACE, root);
     }
     if std::env::var(UPDATE).is_err() {

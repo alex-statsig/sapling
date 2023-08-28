@@ -24,6 +24,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
+use anyhow::Context;
 use anyhow::Result;
 use blackbox::serde_json;
 use clidispatch::dispatch;
@@ -197,6 +198,11 @@ fn dispatch_command(
 ) -> i32 {
     log_repo_path_and_exe_version(dispatcher.repo());
 
+    if let Some(repo) = dispatcher.repo() {
+        tracing::info!(target: "symlink_info",
+                       symlinks_enabled=cfg!(unix) || repo.requirements.contains("windowssymlinks"));
+    }
+
     let run_logger =
         match runlog::Logger::from_repo(dispatcher.repo(), dispatcher.args()[1..].to_vec()) {
             Ok(logger) => Some(logger),
@@ -293,7 +299,8 @@ fn dispatch_command(
                 ));
             }
         }
-        if io.wait_pager().is_err() {
+        if let Err(err) = io.wait_pager().context("error flushing command output") {
+            errors::print_error(&err, io, &dispatcher.args()[1..]);
             return 255;
         }
     }

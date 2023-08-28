@@ -131,11 +131,11 @@ std::string toLogArg(const std::vector<std::string>& args) {
 class ThriftFetchContext : public ObjectFetchContext {
  public:
   explicit ThriftFetchContext(
-      std::optional<pid_t> pid,
+      OptionalProcessId pid,
       folly::StringPiece endpoint)
       : pid_(pid), endpoint_(endpoint) {}
 
-  std::optional<pid_t> getClientPid() const override {
+  OptionalProcessId getClientPid() const override {
     return pid_;
   }
 
@@ -163,7 +163,7 @@ class ThriftFetchContext : public ObjectFetchContext {
   }
 
  private:
-  std::optional<pid_t> pid_;
+  OptionalProcessId pid_;
   std::string_view endpoint_;
   std::unordered_map<std::string, std::string> requestInfo_;
 };
@@ -171,11 +171,11 @@ class ThriftFetchContext : public ObjectFetchContext {
 class PrefetchFetchContext : public ObjectFetchContext {
  public:
   explicit PrefetchFetchContext(
-      std::optional<pid_t> pid,
+      OptionalProcessId pid,
       std::string_view endpoint)
       : pid_(pid), endpoint_(endpoint) {}
 
-  std::optional<pid_t> getClientPid() const override {
+  OptionalProcessId getClientPid() const override {
     return pid_;
   }
 
@@ -197,7 +197,7 @@ class PrefetchFetchContext : public ObjectFetchContext {
   }
 
  private:
-  std::optional<pid_t> pid_;
+  OptionalProcessId pid_;
   std::string_view endpoint_;
 };
 
@@ -218,7 +218,7 @@ class ThriftRequestScope {
       SourceLocation sourceLocation,
       EdenStatsPtr edenStats,
       ThriftStats::DurationPtr statPtr,
-      std::optional<pid_t> pid,
+      OptionalProcessId pid,
       JoinFn&& join)
       : traceBus_{std::move(traceBus)},
         requestId_(generateUniqueID()),
@@ -387,7 +387,7 @@ facebook::eden::InodePtr inodeFromUserPath(
 ThriftRequestTraceEvent ThriftRequestTraceEvent::start(
     uint64_t requestId,
     folly::StringPiece method,
-    std::optional<pid_t> clientPid) {
+    OptionalProcessId clientPid) {
   return ThriftRequestTraceEvent{
       ThriftRequestTraceEvent::START, requestId, method, clientPid};
 }
@@ -395,7 +395,7 @@ ThriftRequestTraceEvent ThriftRequestTraceEvent::start(
 ThriftRequestTraceEvent ThriftRequestTraceEvent::finish(
     uint64_t requestId,
     folly::StringPiece method,
-    std::optional<pid_t> clientPid) {
+    OptionalProcessId clientPid) {
   return ThriftRequestTraceEvent{
       ThriftRequestTraceEvent::FINISH, requestId, method, clientPid};
 }
@@ -839,9 +839,9 @@ ImmediateFuture<Hash20> EdenServiceHandler::getSHA1ForPath(
 }
 
 folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_addBindMount(
-    FOLLY_MAYBE_UNUSED std::unique_ptr<std::string> mountPoint,
-    FOLLY_MAYBE_UNUSED std::unique_ptr<std::string> repoPathStr,
-    FOLLY_MAYBE_UNUSED std::unique_ptr<std::string> targetPath) {
+    std::unique_ptr<std::string> mountPoint,
+    std::unique_ptr<std::string> repoPathStr,
+    std::unique_ptr<std::string> targetPath) {
   auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *mountPoint);
   auto mountHandle = lookupMount(mountPoint);
 
@@ -862,8 +862,8 @@ folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_addBindMount(
 }
 
 folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_removeBindMount(
-    FOLLY_MAYBE_UNUSED std::unique_ptr<std::string> mountPoint,
-    FOLLY_MAYBE_UNUSED std::unique_ptr<std::string> repoPathStr) {
+    std::unique_ptr<std::string> mountPoint,
+    std::unique_ptr<std::string> repoPathStr) {
   auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *mountPoint);
   auto mountHandle = lookupMount(mountPoint);
 
@@ -880,7 +880,7 @@ void EdenServiceHandler::getCurrentJournalPosition(
   auto mountHandle = lookupMount(mountPoint);
   auto latest = mountHandle.getEdenMount().getJournal().getLatest();
 
-  *out.mountGeneration_ref() = mountHandle.getEdenMount().getMountGeneration();
+  out.mountGeneration_ref() = mountHandle.getEdenMount().getMountGeneration();
   if (latest) {
     out.sequenceNumber_ref() = latest->sequenceID;
     out.snapshotHash_ref() =
@@ -979,14 +979,12 @@ TraceEventTimes thriftTraceEventTimes(const TraceEventBase& event) {
   return times;
 }
 
-#ifndef _WIN32
 RequestInfo thriftRequestInfo(pid_t pid, ProcessNameCache& processNameCache) {
   RequestInfo info;
   info.pid_ref() = pid;
   info.processName_ref().from_optional(processNameCache.getProcessName(pid));
   return info;
 }
-#endif
 
 template <typename T>
 class ThriftStreamPublisherOwner {
@@ -1114,8 +1112,8 @@ ThriftRequestMetadata populateThriftRequestMetadata(
   ThriftRequestMetadata thriftRequestMetadata;
   thriftRequestMetadata.requestId() = request.requestId;
   thriftRequestMetadata.method() = request.method;
-  if (request.clientPid.has_value()) {
-    thriftRequestMetadata.clientPid() = request.clientPid.value();
+  if (auto client_pid = request.clientPid) {
+    thriftRequestMetadata.clientPid() = client_pid.value().get();
   }
   return thriftRequestMetadata;
 }
@@ -1233,7 +1231,8 @@ apache::thrift::ServerStream<FsEvent> EdenServiceHandler::traceFsEvents(
     context->argHandle = prjfsChannel->traceDetailedArguments();
   } else {
     EDEN_BUG() << "tracing isn't supported yet for the "
-               << edenMount.getCheckoutConfig()->getMountProtocol()
+               << fmt::underlying(
+                      edenMount.getCheckoutConfig()->getMountProtocol())
                << " filesystem type";
   }
 #else
@@ -1245,7 +1244,8 @@ apache::thrift::ServerStream<FsEvent> EdenServiceHandler::traceFsEvents(
     context->argHandle = nfsdChannel->traceDetailedArguments();
   } else {
     EDEN_BUG() << "tracing isn't supported yet for the "
-               << edenMount.getCheckoutConfig()->getMountProtocol()
+               << fmt::underlying(
+                      edenMount.getCheckoutConfig()->getMountProtocol())
                << " filesystem type";
   }
 #endif // _WIN32
@@ -1417,6 +1417,7 @@ std::shared_ptr<HgQueuedBackingStore> castToHgQueuedBackingStore(
  */
 void convertHgImportTraceEventToHgEvent(
     const HgImportTraceEvent& event,
+    ProcessNameCache& processNameCache,
     HgEvent& te) {
   te.times_ref() = thriftTraceEventTimes(event);
   switch (event.eventType) {
@@ -1475,8 +1476,10 @@ void convertHgImportTraceEventToHgEvent(
   te.manifestNodeId_ref() = event.manifestNodeId.toString();
   te.path_ref() = event.getPath();
 
-  // TODO: trace requesting pid
-  // te.requestInfo_ref() = thriftRequestInfo(pid);
+  if (auto pid = event.pid) {
+    te.requestInfo_ref() =
+        thriftRequestInfo(pid.value().get(), processNameCache);
+  }
 }
 
 apache::thrift::ServerStream<HgEvent> EdenServiceHandler::traceHgEvents(
@@ -1502,10 +1505,13 @@ apache::thrift::ServerStream<HgEvent> EdenServiceHandler::traceHgEvents(
   context->subHandle = hgBackingStore->getTraceBus().subscribeFunction(
       fmt::format(
           "hgtrace-{}", mountHandle.getEdenMount().getPath().basename()),
-      [publisher = ThriftStreamPublisherOwner{std::move(publisher)}](
+      [publisher = ThriftStreamPublisherOwner{std::move(publisher)},
+       processNameCache =
+           mountHandle.getEdenMount().getServerState()->getProcessNameCache()](
           const HgImportTraceEvent& event) {
         HgEvent thriftEvent;
-        convertHgImportTraceEventToHgEvent(event, thriftEvent);
+        convertHgImportTraceEventToHgEvent(
+            event, *processNameCache, thriftEvent);
         publisher.next(thriftEvent);
       });
 
@@ -1654,6 +1660,7 @@ ImmediateFuture<folly::Unit> diffBetweenRoots(
       cancellation,
       true,
       checkoutConfig.getCaseSensitive(),
+      checkoutConfig.getEnableWindowsSymlinks(),
       objectStore,
       nullptr);
   auto fut = diffRoots(diffContext.get(), fromRoot, toRoot);
@@ -1935,11 +1942,18 @@ EdenServiceHandler::semifuture_getEntryInformation(
                  .thenValue([mountHandle,
                              paths = std::move(paths),
                              fetchContext = fetchContext.copy()](auto&&) {
+                   bool windowsSymlinksEnabled =
+                       mountHandle.getEdenMount()
+                           .getCheckoutConfig()
+                           ->getEnableWindowsSymlinks();
                    return collectAll(applyToVirtualInode(
                                          mountHandle.getRootInode(),
                                          *paths,
-                                         [](const VirtualInode& inode) {
-                                           return inode.getDtype();
+                                         [windowsSymlinksEnabled](
+                                             const VirtualInode& inode) {
+                                           return filteredEntryDtype(
+                                               inode.getDtype(),
+                                               windowsSymlinksEnabled);
                                          },
                                          mountHandle.getObjectStorePtr(),
                                          fetchContext))
@@ -2614,13 +2628,13 @@ void maybeLogExpensiveGlob(
   if (shouldLogExpensiveGlob) {
     auto logString = globber.logString(globs);
     std::string client_cmdline;
-    std::optional<pid_t> clientPid = context->getClientPid();
-    if (clientPid) {
+    if (auto clientPid = context->getClientPid()) {
       // TODO: we should look up client scope here instead of command line
       // since it will give move context into the overarching process or
       // system producing the expensive query
-      client_cmdline =
-          serverState->getProcessNameCache()->lookup(clientPid.value()).get();
+      client_cmdline = serverState->getProcessNameCache()
+                           ->lookup(clientPid.value().get())
+                           .get();
       std::replace(client_cmdline.begin(), client_cmdline.end(), '\0', ' ');
     }
 
@@ -3166,7 +3180,7 @@ EdenServiceHandler::semifuture_debugGetBlob(
             id,
             folly::Try<BlobPtr>{hgBackingStore->getHgBackingStore()
                                     .getDatapackStore()
-                                    .getBlobLocal(id, proxyHash)},
+                                    .getBlobLocal(proxyHash)},
             DataFetchOrigin::LOCAL_BACKING_STORE)});
   }
   if (originFlags.contains(FROMWHERE_REMOTE_BACKING_STORE)) {
@@ -3497,8 +3511,8 @@ void EdenServiceHandler::debugOutstandingFuseCalls(
 }
 
 void EdenServiceHandler::debugOutstandingNfsCalls(
-    FOLLY_MAYBE_UNUSED std::vector<NfsCall>& outstandingCalls,
-    FOLLY_MAYBE_UNUSED std::unique_ptr<std::string> mountPoint) {
+    std::vector<NfsCall>& outstandingCalls,
+    std::unique_ptr<std::string> mountPoint) {
   auto helper = INSTRUMENT_THRIFT_CALL(DBG2);
 
   auto mountHandle = lookupMount(mountPoint);
@@ -3532,8 +3546,7 @@ void EdenServiceHandler::debugOutstandingPrjfsCalls(
 }
 
 void EdenServiceHandler::debugOutstandingThriftRequests(
-    FOLLY_MAYBE_UNUSED std::vector<ThriftRequestMetadata>&
-        outstandingRequests) {
+    std::vector<ThriftRequestMetadata>& outstandingRequests) {
   auto helper = INSTRUMENT_THRIFT_CALL(DBG2);
 
   const auto requestsLockedPtr = outstandingThriftRequests_.rlock();
@@ -3705,7 +3718,7 @@ void EdenServiceHandler::getAccessCounts(
 
     auto pidFetchesLockedPtr = pidFetches.rlock();
     for (auto& [pid, fetchCount] : *pidFetchesLockedPtr) {
-      ma.fetchCountsByPid_ref()[pid] = fetchCount;
+      ma.fetchCountsByPid_ref()[pid.get()] = fetchCount;
     }
   }
 }
@@ -4111,7 +4124,8 @@ void EdenServiceHandler::getRetroactiveHgEvents(
   thriftEvents.reserve(bufferEvents.size());
   for (auto const& event : bufferEvents) {
     HgEvent thriftEvent{};
-    convertHgImportTraceEventToHgEvent(event, thriftEvent);
+    convertHgImportTraceEventToHgEvent(
+        event, *server_->getServerState()->getProcessNameCache(), thriftEvent);
     thriftEvents.push_back(std::move(thriftEvent));
   }
 
@@ -4274,7 +4288,7 @@ void EdenServiceHandler::fillDaemonInfo(DaemonInfo& info) {
                << enumValue(server_->getStatus());
   }();
 
-  info.pid_ref() = getpid();
+  info.pid_ref() = ProcessId::current().get();
   info.commandLine_ref() = originalCommandLine_;
   info.status_ref() = status;
 
@@ -4324,7 +4338,7 @@ void EdenServiceHandler::checkPrivHelper(PrivHelperInfo& result) {
 }
 
 int64_t EdenServiceHandler::getPid() {
-  return getpid();
+  return ProcessId::current().get();
 }
 
 void EdenServiceHandler::initiateShutdown(std::unique_ptr<std::string> reason) {
@@ -4342,7 +4356,7 @@ void EdenServiceHandler::getConfig(
   result = config->toThriftConfigData();
 }
 
-std::optional<pid_t> EdenServiceHandler::getAndRegisterClientPid() {
+OptionalProcessId EdenServiceHandler::getAndRegisterClientPid() {
 #ifndef _WIN32
   // The Cpp2RequestContext for a thrift request is kept in a thread local
   // on the thread which the request originates. This means this must be run
@@ -4351,13 +4365,16 @@ std::optional<pid_t> EdenServiceHandler::getAndRegisterClientPid() {
   // if connectionContext will be a null pointer in an async method, so we
   // need to check for this
   if (connectionContext) {
-    pid_t clientPid =
-        connectionContext->getConnectionContext()->getPeerEffectiveCreds()->pid;
-    server_->getServerState()->getProcessNameCache()->add(clientPid);
-    return clientPid;
+    if (auto peerCreds = connectionContext->getConnectionContext()
+                             ->getPeerEffectiveCreds()) {
+      pid_t clientPid = peerCreds->pid;
+      server_->getServerState()->getProcessNameCache()->add(clientPid);
+      return ProcessId(clientPid);
+    }
   }
   return std::nullopt;
 #else
+  // Unix domain sockets on Windows don't support peer credentials.
   return std::nullopt;
 #endif
 }

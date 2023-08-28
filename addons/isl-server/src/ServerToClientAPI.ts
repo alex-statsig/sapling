@@ -10,6 +10,7 @@ import type {RepositoryReference} from './RepositoryCache';
 import type {ServerSideTracker} from './analytics/serverSideTracker';
 import type {Logger} from './logger';
 import type {ServerPlatform} from './serverPlatform';
+import type {Serializable} from 'isl/src/serialize';
 import type {
   ServerToClientMessage,
   ClientToServerMessage,
@@ -31,7 +32,7 @@ import {repositoryCache} from './RepositoryCache';
 import {findPublicAncestor, parseExecJson} from './utils';
 import fs from 'fs';
 import {serializeToString, deserializeFromString} from 'isl/src/serialize';
-import {revsetArgsForComparison, revsetForComparison} from 'shared/Comparison';
+import {revsetForComparison} from 'shared/Comparison';
 import {randomId, unwrap} from 'shared/utils';
 import {Readable} from 'stream';
 
@@ -41,6 +42,7 @@ export type OutgoingMessage = ServerToClientMessage;
 
 type GeneralMessage = IncomingMessage &
   (
+    | {type: 'heartbeat'}
     | {type: 'changeCwd'}
     | {type: 'requestRepoInfo'}
     | {type: 'requestApplicationInfo'}
@@ -292,6 +294,10 @@ export default class ServerToClientAPI {
    */
   private handleIncomingGeneralMessage(data: GeneralMessage) {
     switch (data.type) {
+      case 'heartbeat': {
+        this.postMessage({type: 'heartbeat', id: data.id});
+        break;
+      }
       case 'track': {
         this.tracker.trackData(data.data);
         break;
@@ -318,8 +324,11 @@ export default class ServerToClientAPI {
       case 'requestApplicationInfo': {
         this.postMessage({
           type: 'applicationInfo',
-          platformName: this.platform.platformName,
-          version: this.connection.version,
+          info: {
+            platformName: this.platform.platformName,
+            version: this.connection.version,
+            logFilePath: this.connection.logFileLocation ?? '(no log file, logging to stdout)',
+          },
         });
         break;
       }
@@ -499,19 +508,9 @@ export default class ServerToClientAPI {
       }
       case 'requestComparison': {
         const {comparison} = data;
-        const DIFF_CONTEXT_LINES = 4;
         const diff: Promise<Result<string>> = repo
-          .runCommand([
-            'diff',
-            ...revsetArgsForComparison(comparison),
-            // don't include a/ and b/ prefixes on files
-            '--noprefix',
-            '--no-binary',
-            '--nodate',
-            '--unified',
-            String(DIFF_CONTEXT_LINES),
-          ])
-          .then(o => ({value: o.stdout}))
+          .runDiff(comparison)
+          .then(value => ({value}))
           .catch(error => {
             logger?.error('error running diff', error.toString());
             return {error};
@@ -590,7 +589,26 @@ export default class ServerToClientAPI {
         break;
       }
       case 'fetchDiffSummaries': {
-        repo.codeReviewProvider?.triggerDiffSummariesFetch(repo.getAllDiffIds());
+        repo.codeReviewProvider?.triggerDiffSummariesFetch(data.diffIds ?? repo.getAllDiffIds());
+        break;
+      }
+      case 'getSuggestedReviewers': {
+        repo.codeReviewProvider?.getSuggestedReviewers?.(data.context).then(reviewers => {
+          this.postMessage({
+            type: 'gotSuggestedReviewers',
+            reviewers,
+            key: data.key,
+          });
+        });
+        break;
+      }
+      case 'updateRemoteDiffMessage': {
+        repo.codeReviewProvider
+          ?.updateDiffMessage?.(data.diffId, data.title, data.description)
+          ?.catch(err => err)
+          ?.then((error: string | undefined) => {
+            this.postMessage({type: 'updatedRemoteDiffMessage', diffId: data.diffId, error});
+          });
         break;
       }
       case 'loadMoreCommits': {
@@ -604,7 +622,12 @@ export default class ServerToClientAPI {
       case 'exportStack': {
         const {revs, assumeTracked} = data;
         const assumeTrackedArgs = (assumeTracked ?? []).map(path => `--assume-tracked=${path}`);
-        const exec = repo.runCommand(['debugexportstack', '-r', revs, ...assumeTrackedArgs]);
+        const exec = repo.runCommand(
+          ['debugexportstack', '-r', revs, ...assumeTrackedArgs],
+          undefined,
+          undefined,
+          /* don't timeout */ 0,
+        );
         const reply = (stack?: ExportStack, error?: string) => {
           this.postMessage({
             type: 'exportedStack',
@@ -619,11 +642,50 @@ export default class ServerToClientAPI {
       }
       case 'importStack': {
         const stdinStream = Readable.from(JSON.stringify(data.stack));
-        const exec = repo.runCommand(['debugimportstack'], undefined, {stdin: stdinStream});
+        const exec = repo.runCommand(
+          ['debugimportstack'],
+          undefined,
+          {stdin: stdinStream},
+          /* don't timeout */ 0,
+        );
         const reply = (imported?: ImportedStack, error?: string) => {
           this.postMessage({type: 'importedStack', imported: imported ?? [], error});
         };
         parseExecJson(exec, reply);
+        break;
+      }
+      case 'fetchFeatureFlag': {
+        Internal.fetchFeatureFlag?.(data.name).then((passes: boolean) => {
+          this.logger.info(`feature flag ${data.name} ${passes ? 'PASSES' : 'FAILS'}`);
+          this.postMessage({type: 'fetchedFeatureFlag', name: data.name, passes});
+        });
+        break;
+      }
+      case 'fetchInternalUserInfo': {
+        Internal.fetchUserInfo?.().then((info: Serializable) => {
+          this.logger.info('user info:', info);
+          this.postMessage({type: 'fetchedInternalUserInfo', info});
+        });
+        break;
+      }
+      case 'generateAICommitMessage': {
+        if (Internal.generateAICommitMessage == null) {
+          break;
+        }
+        repo.runDiff(data.comparison, /* context lines */ 4).then(diff => {
+          Internal.generateAICommitMessage?.(logger, {
+            title: data.title,
+            context: diff,
+          })
+            .catch((error: Error) => ({error}))
+            .then((result: Result<string>) => {
+              this.postMessage({
+                type: 'generatedAICommitMessage',
+                message: result,
+                id: data.id,
+              });
+            });
+        });
         break;
       }
       default: {

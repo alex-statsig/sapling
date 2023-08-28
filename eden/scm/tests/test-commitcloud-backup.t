@@ -1,14 +1,11 @@
-#chg-compatible
 #debugruntest-compatible
 #inprocess-hg-incompatible
   $ setconfig format.use-segmented-changelog=true
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig workingcopy.ruststatus=False
   $ setconfig experimental.allowfilepeer=True
 
   $ enable amend
   $ setconfig infinitepushbackup.hostname=testhost
-  $ disable treemanifest
 
   $ . "$TESTDIR/library.sh"
   $ . "$TESTDIR/infinitepush/library.sh"
@@ -16,8 +13,7 @@
   $ enable remotenames
 
 Setup server
-  $ hg init repo
-  $ cd repo
+  $ newserver repo
   $ setupserver
   $ cd ..
 
@@ -35,7 +31,7 @@ Make commit and backup it.
   remote: pushing 1 commit:
   remote:     7e6a6fd9c7c8  commit
   $ scratchnodes
-  7e6a6fd9c7c8c8c307ee14678f03d63af3a7b455 168423c30397d95ef5f44d883f0887f0f5be0936
+  7e6a6fd9c7c8c8c307ee14678f03d63af3a7b455 c13b98aa53dd65cc9225f3d7ebf6dbe98e910948
 
 Make first commit public (by doing push) and then backup new commit
   $ hg debugmakepublic .
@@ -288,7 +284,7 @@ Throw in an empty transaction - this should not trigger a backup.
 Check the logs, make sure just one process was started
   $ cat $TESTTMP/logs/test/*
   
-  * starting: hg cloud backup * (glob)
+  * starting: *hg cloud backup * (glob)
   backing up stack rooted at 426bada5c675
   commitcloud: backed up 2 commits
   remote: pushing 4 commits:
@@ -317,14 +313,14 @@ Fail to push a backup by setting the server maxbundlesize very low
   remote:     0ff831d99e2e  ssh1
   remote:     eec37aac152b  ssh2
   remote:     73e861ba66d5  toobig
-  push failed: bundle is too big: 1488 bytes. max allowed size is 0 MB
+  push failed: bundle is too big: * bytes. max allowed size is 0 MB (glob)
   retrying push with discovery
   searching for changes
   remote: pushing 3 commits:
   remote:     0ff831d99e2e  ssh1
   remote:     eec37aac152b  ssh2
   remote:     73e861ba66d5  toobig
-  push of head 73e861ba66d5 failed: bundle is too big: 1488 bytes. max allowed size is 0 MB
+  push of head 73e861ba66d5 failed: bundle is too big: * bytes. max allowed size is 0 MB (glob)
   commitcloud: failed to back up 1 commit
   [2]
   $ hg cloud check -r .
@@ -348,7 +344,7 @@ Set the limit back high, and try again
   $ hg cloud check -r . --json
   {"73e861ba66d5dc1998052f3ae2cf8cf7924ed863": true} (no-eol)
   $ scratchnodes | grep 73e861ba66d5dc1998052f3ae2cf8cf7924ed863
-  73e861ba66d5dc1998052f3ae2cf8cf7924ed863 1b5db94fc7daec8da5284b7b989fff125cb6f35b
+  73e861ba66d5dc1998052f3ae2cf8cf7924ed863 * (glob)
 
 Remove the backup state file
   $ rm .hg/commitcloud/backedupheads.f6bce706

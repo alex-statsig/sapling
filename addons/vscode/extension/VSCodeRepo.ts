@@ -14,6 +14,7 @@ import type {Comparison} from 'shared/Comparison';
 import type {Writable} from 'shared/typeUtils';
 
 import {encodeSaplingDiffUri} from './DiffContentProvider';
+import {executeVSCodeCommand} from './commands';
 import {getCLICommand} from './config';
 import {t} from './i18n';
 import {Repository} from 'isl-server/src/Repository';
@@ -83,6 +84,8 @@ export class VSCodeReposList {
       repo?.unref();
       this.knownRepos.delete(fsPath);
     }
+
+    executeVSCodeCommand('setContext', 'sapling:hasRepo', this.knownRepos.size > 0);
   }
 
   /** return the VSCodeRepo that contains the given path */

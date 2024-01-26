@@ -16,22 +16,22 @@ import {VSCodeCheckbox} from './VSCodeCheckbox';
 import {codeReviewProvider} from './codeReview/CodeReviewInfo';
 import {submitAsDraft, SubmitAsDraftCheckbox} from './codeReview/DraftCheckbox';
 import {t, T} from './i18n';
-import {persistAtomToConfigEffect} from './persistAtomToConfigEffect';
+import {configBackedAtom, readAtom} from './jotaiUtils';
 import {CommitPreview} from './previews';
 import {useModal} from './useModal';
 import {VSCodeDivider, VSCodeButton, VSCodeTextField} from '@vscode/webview-ui-toolkit/react';
+import {useAtom, useAtomValue} from 'jotai';
 import {useState} from 'react';
-import {atom, useRecoilCallback, useRecoilState, useRecoilValue} from 'recoil';
+import {useRecoilCallback, useRecoilValue} from 'recoil';
 import {useAutofocusRef} from 'shared/hooks';
 import {unwrap} from 'shared/utils';
 
 import './ConfirmSubmitStack.css';
 
-export const confirmShouldSubmitEnabledAtom = atom<boolean>({
-  key: 'confirmShouldSubmitEnabledAtom',
-  default: true,
-  effects: [persistAtomToConfigEffect('isl.show-stack-submit-confirmation', true as boolean)],
-});
+export const confirmShouldSubmitEnabledAtom = configBackedAtom<boolean>(
+  'isl.show-stack-submit-confirmation',
+  true,
+);
 
 export type SubmitConfirmationReponse =
   | {submitAsDraft: boolean; updateMessage?: string}
@@ -41,7 +41,7 @@ type SubmitType = 'submit' | 'submit-all' | 'resubmit';
 
 export function shouldShowSubmitStackConfirmation(snapshot: Snapshot): boolean {
   const provider = snapshot.getLoadable(codeReviewProvider).valueMaybe();
-  const shouldShowConfirmation = snapshot.getLoadable(confirmShouldSubmitEnabledAtom).valueMaybe();
+  const shouldShowConfirmation = readAtom(confirmShouldSubmitEnabledAtom);
   return (
     shouldShowConfirmation === true &&
     // if you can't submit as draft, no need to show the interstitial
@@ -60,11 +60,9 @@ export function shouldShowSubmitStackConfirmation(snapshot: Snapshot): boolean {
 export function useShowConfirmSubmitStack() {
   const showModal = useModal();
 
-  useRecoilValue(confirmShouldSubmitEnabledAtom); // ensure this config is loaded ahead of clicking this
-
   return useRecoilCallback(({snapshot}) => async (mode: SubmitType, stack: Array<CommitInfo>) => {
     if (!shouldShowSubmitStackConfirmation(snapshot)) {
-      const draft = snapshot.getLoadable(submitAsDraft).valueMaybe();
+      const draft = readAtom(submitAsDraft);
       return {submitAsDraft: draft ?? false};
     }
 
@@ -95,10 +93,10 @@ function ConfirmModalContent({
   stack: Array<CommitInfo>;
   returnResultAndDismiss: (value: SubmitConfirmationReponse) => unknown;
 }) {
-  const [showSubmitConfirmation, setShowSubmitConfirmation] = useRecoilState(
+  const [showSubmitConfirmation, setShowSubmitConfirmation] = useAtom(
     confirmShouldSubmitEnabledAtom,
   );
-  const shouldSubmitAsDraft = useRecoilValue(submitAsDraft);
+  const shouldSubmitAsDraft = useAtomValue(submitAsDraft);
   const [updateMessage, setUpdateMessage] = useState('');
   const commitsWithDiffs = stack.filter(commit => commit.diffId != null);
 

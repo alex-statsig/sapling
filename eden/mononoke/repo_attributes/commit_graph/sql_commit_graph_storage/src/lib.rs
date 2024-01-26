@@ -1015,24 +1015,48 @@ impl SqlCommitGraphStorage {
             );
             let fetched_edges = match target.edge {
                 PrefetchEdge::FirstParent => {
-                    SelectManyChangesetsWithFirstParentPrefetch::query(
-                        &self.read_connection.conn,
-                        &self.repo_id,
-                        &steps,
-                        &target.generation.value(),
-                        cs_ids,
-                    )
-                    .await?
+                    if let Some(cri) = ctx.metadata().client_request_info() {
+                        SelectManyChangesetsWithFirstParentPrefetch::traced_query(
+                            &self.read_connection.conn,
+                            cri,
+                            &self.repo_id,
+                            &steps,
+                            &target.generation.value(),
+                            cs_ids,
+                        )
+                        .await?
+                    } else {
+                        SelectManyChangesetsWithFirstParentPrefetch::query(
+                            &self.read_connection.conn,
+                            &self.repo_id,
+                            &steps,
+                            &target.generation.value(),
+                            cs_ids,
+                        )
+                        .await?
+                    }
                 }
                 PrefetchEdge::SkipTreeSkewAncestor => {
-                    SelectManyChangesetsWithSkipTreeSkewAncestorPrefetch::query(
-                        &self.read_connection.conn,
-                        &self.repo_id,
-                        &steps,
-                        &target.generation.value(),
-                        cs_ids,
-                    )
-                    .await?
+                    if let Some(cri) = ctx.metadata().client_request_info() {
+                        SelectManyChangesetsWithSkipTreeSkewAncestorPrefetch::traced_query(
+                            &self.read_connection.conn,
+                            cri,
+                            &self.repo_id,
+                            &steps,
+                            &target.generation.value(),
+                            cs_ids,
+                        )
+                        .await?
+                    } else {
+                        SelectManyChangesetsWithSkipTreeSkewAncestorPrefetch::query(
+                            &self.read_connection.conn,
+                            &self.repo_id,
+                            &steps,
+                            &target.generation.value(),
+                            cs_ids,
+                        )
+                        .await?
+                    }
                 }
             };
             Ok(Self::collect_changeset_edges(&fetched_edges))
@@ -1175,9 +1199,10 @@ impl CommitGraphStorage for SqlCommitGraphStorage {
             .collect::<Vec<_>>();
         let (transaction, result) = InsertChangesetsNoEdges::query_with_transaction(
             transaction,
+            // This pattern is used to convert a ref to tuple into a tuple of refs.
+            #[allow(clippy::map_identity)]
             cs_no_edges
                 .iter()
-                // This does &(TypeA, TypeB, ...) -> (&TypeA, &TypeB, ...)
                 .map(|(a, b, c, d, e, f)| (a, b, c, d, e, f))
                 .collect::<Vec<_>>()
                 .as_slice(),
@@ -1253,6 +1278,8 @@ impl CommitGraphStorage for SqlCommitGraphStorage {
 
         let (transaction, _) = FixEdges::query_with_transaction(
             transaction,
+            // This pattern is used to convert a ref to tuple into a tuple of refs.
+            #[allow(clippy::map_identity)]
             rows.iter()
                 .map(|(a, b, c, d, e, f, g, h, i, j, k)| (a, b, c, d, e, f, g, h, i, j, k))
                 .collect::<Vec<_>>()
@@ -1274,6 +1301,8 @@ impl CommitGraphStorage for SqlCommitGraphStorage {
 
         let (transaction, result) = InsertMergeParents::query_with_transaction(
             transaction,
+            // This pattern is used to convert a ref to tuple into a tuple of refs.
+            #[allow(clippy::map_identity)]
             merge_parent_rows
                 .iter()
                 .map(|(a, b, c)| (a, b, c))
@@ -1320,7 +1349,7 @@ impl CommitGraphStorage for SqlCommitGraphStorage {
             &edges.node.skip_tree_depth,
             &edges.node.p1_linear_depth,
             &edges.parents.len(),
-            &edges.parents.get(0).map(|node| node.cs_id),
+            &edges.parents.first().map(|node| node.cs_id),
             &edges.merge_ancestor.map(|node| node.cs_id),
             &edges.skip_tree_parent.map(|node| node.cs_id),
             &edges.skip_tree_skew_ancestor.map(|node| node.cs_id),
@@ -1348,6 +1377,8 @@ impl CommitGraphStorage for SqlCommitGraphStorage {
 
                 let (transaction, result) = InsertMergeParents::query_with_transaction(
                     transaction,
+                    // This pattern is used to convert a ref to tuple into a tuple of refs.
+                    #[allow(clippy::map_identity)]
                     merge_parent_rows
                         .iter()
                         .map(|(a, b, c)| (a, b, c))

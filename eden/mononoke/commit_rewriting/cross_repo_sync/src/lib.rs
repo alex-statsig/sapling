@@ -129,7 +129,6 @@ use synced_commit_mapping::SyncedCommitMappingEntry;
 use synced_commit_mapping::SyncedCommitSourceRepo;
 use thiserror::Error;
 use topo_sort::sort_topological;
-use tunables::tunables;
 use types::Source;
 use types::Target;
 
@@ -1733,11 +1732,12 @@ impl<'a, R: Repo> CommitInMemorySyncer<'a, R> {
         // can only do that when they're not changing the mapping.
         let empty_commit_from_large_repo = if !self.small_to_large
             && maybe_mapping_change_version.is_none()
-            && tunables::tunables()
-                .by_repo_cross_repo_skip_backsyncing_ordinary_empty_commits(
-                    self.source_repo_name().0,
-                )
-                .unwrap_or(false)
+            && justknobs::eval(
+                "scm/mononoke:cross_repo_skip_backsyncing_ordinary_empty_commits",
+                None,
+                Some(self.source_repo_name().0),
+            )
+            .unwrap_or(false)
         {
             EmptyCommitFromLargeRepo::Discard
         } else {
@@ -2291,8 +2291,7 @@ where
             break;
         }
 
-        let leased = if tunables()
-            .xrepo_disable_commit_sync_lease()
+        let leased = if justknobs::eval("scm/mononoke:xrepo_disable_commit_sync_lease", None, None)
             .unwrap_or_default()
         {
             true

@@ -16,26 +16,23 @@ import {Tooltip} from '../Tooltip';
 import {T, t} from '../i18n';
 import {CircleEllipsisIcon} from '../icons/CircleEllipsisIcon';
 import {CircleExclamationIcon} from '../icons/CircleExclamationIcon';
+import {configBackedAtom} from '../jotaiUtils';
 import {PullRevOperation} from '../operations/PullRevOperation';
-import {persistAtomToConfigEffect} from '../persistAtomToConfigEffect';
 import platform from '../platform';
 import {useRunOperation} from '../serverAPIState';
 import {exactRevset} from '../types';
 import {diffSummary, codeReviewProvider} from './CodeReviewInfo';
 import {openerUrlForDiffUrl} from './github/GitHubUrlOpener';
-import {SyncStatus, syncStatusAtom} from './syncStatus';
+import {SyncStatus, syncStatusByHash} from './syncStatus';
 import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
+import {useAtomValue} from 'jotai';
 import {useState, Component, Suspense} from 'react';
-import {atom, useRecoilValue} from 'recoil';
+import {useRecoilValue} from 'recoil';
 import {Icon} from 'shared/Icon';
 
 import './DiffBadge.css';
 
-export const showDiffNumberConfig = atom<boolean>({
-  key: 'showDiffNumberConfig',
-  default: false,
-  effects: [persistAtomToConfigEffect('isl.show-diff-number')],
-});
+export const showDiffNumberConfig = configBackedAtom<boolean>('isl.show-diff-number', false);
 
 /**
  * Component that shows inline summary information about a Diff,
@@ -46,6 +43,12 @@ export function DiffInfo({commit, hideActions}: {commit: CommitInfo; hideActions
   const diffId = commit.diffId;
   if (repo == null || diffId == null) {
     return null;
+  }
+  // Do not show diff info (and "Ship It" button) if there are successors.
+  // Users should look at the diff info and buttons from the successor commit instead.
+  // But the diff number can still be useful so show it.
+  if (commit.successorInfo != null) {
+    return <DiffNumber>{repo.formatDiffNumber(diffId)}</DiffNumber>;
   }
   return (
     <DiffErrorBoundary provider={repo} diffId={diffId}>
@@ -101,7 +104,7 @@ function DiffInfoInner({
   hideActions: boolean;
 }) {
   const diffInfoResult = useRecoilValue(diffSummary(diffId));
-  const syncStatuses = useRecoilValue(syncStatusAtom);
+  const syncStatus = useRecoilValue(syncStatusByHash(commit.hash));
   if (diffInfoResult.error) {
     return <DiffLoadError number={provider.formatDiffNumber(diffId)} provider={provider} />;
   }
@@ -109,7 +112,7 @@ function DiffInfoInner({
     return <DiffSpinner diffId={diffId} provider={provider} />;
   }
   const info = diffInfoResult.value;
-  const syncStatus = syncStatuses?.get(commit.hash);
+  const shouldHideActions = hideActions || provider.isDiffClosed(info);
   return (
     <div
       className={`diff-info ${provider.name}-diff-info`}
@@ -121,7 +124,7 @@ function DiffInfoInner({
       )}
       <DiffComments diff={info} />
       <DiffNumber>{provider.formatDiffNumber(diffId)}</DiffNumber>
-      {hideActions === true ? null : syncStatus === SyncStatus.RemoteIsNewer ? (
+      {shouldHideActions ? null : syncStatus === SyncStatus.RemoteIsNewer ? (
         <DownloadNewVersionButton diffId={diffId} provider={provider} />
       ) : syncStatus === SyncStatus.LocalIsNewer ? (
         <ResubmitSyncButton commit={commit} provider={provider} />
@@ -196,7 +199,7 @@ function ResubmitSyncButton({
 
 function DiffNumber({children}: {children: string}) {
   const [showing, setShowing] = useState(false);
-  const showDiffNumber = useRecoilValue(showDiffNumberConfig);
+  const showDiffNumber = useAtomValue(showDiffNumberConfig);
   if (!children || !showDiffNumber) {
     return null;
   }

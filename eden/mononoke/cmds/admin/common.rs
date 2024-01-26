@@ -12,8 +12,6 @@ use anyhow::Error;
 use blobrepo::BlobRepo;
 use blobstore::Loadable;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
-use bookmarks::BookmarkKey;
-use bookmarks::BookmarkUpdateReason;
 use bookmarks::BookmarksRef;
 use cmdlib::args;
 use cmdlib::helpers;
@@ -27,15 +25,11 @@ use mercurial_types::HgChangesetId;
 use mercurial_types::HgFileNodeId;
 use mercurial_types::NonRootMPath;
 use mononoke_types::BonsaiChangeset;
-use mononoke_types::DateTime;
 use mononoke_types::FileChange;
-use mononoke_types::Timestamp;
 use repo_blobstore::RepoBlobstore;
 use repo_blobstore::RepoBlobstoreRef;
 use repo_factory::RepoFactoryBuilder;
 use repo_identity::RepoIdentityRef;
-use serde_json::json;
-use serde_json::to_string_pretty;
 use slog::debug;
 use slog::Logger;
 use synced_commit_mapping::SqlSyncedCommitMapping;
@@ -77,38 +71,6 @@ pub fn print_bonsai_changeset(bcs: &BonsaiChangeset) {
     }
 }
 
-pub fn format_bookmark_log_entry(
-    json_flag: bool,
-    changeset_id: String,
-    reason: BookmarkUpdateReason,
-    timestamp: Timestamp,
-    changeset_type: &str,
-    bookmark: BookmarkKey,
-    bundle_id: Option<u64>,
-) -> String {
-    let reason_str = reason.to_string();
-    if json_flag {
-        let answer = json!({
-            "changeset_type": changeset_type,
-            "changeset_id": changeset_id,
-            "reason": reason_str,
-            "timestamp_sec": timestamp.timestamp_seconds(),
-            "bundle_id": bundle_id,
-        });
-        to_string_pretty(&answer).unwrap()
-    } else {
-        let dt: DateTime = timestamp.into();
-        let dts = dt.as_chrono().format("%b %e %T %Y");
-        match bundle_id {
-            Some(bundle_id) => format!(
-                "{} ({}) {} {} {}",
-                bundle_id, bookmark, changeset_id, reason, dts
-            ),
-            None => format!("({}) {} {} {}", bookmark, changeset_id, reason, dts),
-        }
-    }
-}
-
 // The function retrieves the HgFileNodeId of a file, based on path and rev.
 // If the path is not valid an error is expected.
 pub async fn get_file_nodes(
@@ -123,7 +85,7 @@ pub async fn get_file_nodes(
     let manifest_entries: HashMap<_, _> = root_mf_id
         .find_entries(ctx, repo.repo_blobstore().clone(), paths.clone())
         .try_filter_map(|(path, entry)| async move {
-            let path: Option<NonRootMPath> = path.into();
+            let path = path.into_optional_non_root_path();
             let result =
                 path.and_then(move |path| entry.into_leaf().map(move |leaf| (path, leaf.1)));
             Ok(result)

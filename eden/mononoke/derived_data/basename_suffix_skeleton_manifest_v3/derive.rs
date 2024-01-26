@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
-use basename_suffix_skeleton_manifest::BssmPath;
 use blobstore::Blobstore;
 use blobstore::Loadable;
 use blobstore::Storable;
@@ -40,6 +39,7 @@ use skeleton_manifest::mapping::get_file_changes;
 use skeleton_manifest::RootSkeletonManifestId;
 
 use crate::mapping::RootBssmV3DirectoryId;
+use crate::path::BssmPath;
 
 /// Returns the changes that need to be applied to BSSM during derivation,
 /// by getting the file changes from a bonsai changeset, expanding implicit
@@ -109,24 +109,15 @@ async fn create_bssm_v3_directory(
     blobstore: Arc<dyn Blobstore>,
     subentries: TreeInfoSubentries<BssmV3Directory, (), (), LoadableShardedMapV2Node<BssmV3Entry>>,
 ) -> Result<BssmV3Directory> {
-    let subentries: TrieMap<_> = match subentries {
-        TreeInfoSubentries::AllSubentries(subentries) => subentries
-            .into_iter()
-            .map(|(path, (_ctx, entry))| (path, Either::Left(mf_entry_to_bssm_v3_entry(entry))))
-            .collect(),
-        TreeInfoSubentries::ReusedMapsAndSubentries {
-            produced_subentries_and_reused_maps,
-            ..
-        } => produced_subentries_and_reused_maps
-            .into_iter()
-            .map(|(prefix, entry_or_map)| match entry_or_map {
-                Either::Left((_maybe_ctx, entry)) => {
-                    (prefix, Either::Left(mf_entry_to_bssm_v3_entry(entry)))
-                }
-                Either::Right(map) => (prefix, Either::Right(map)),
-            })
-            .collect(),
-    };
+    let subentries: TrieMap<_> = subentries
+        .into_iter()
+        .map(|(prefix, entry_or_map)| match entry_or_map {
+            Either::Left((_maybe_ctx, entry)) => {
+                (prefix, Either::Left(mf_entry_to_bssm_v3_entry(entry)))
+            }
+            Either::Right(map) => (prefix, Either::Right(map)),
+        })
+        .collect();
 
     let subentries =
         ShardedMapV2Node::from_entries_and_partial_maps(&ctx, &blobstore, subentries).await?;

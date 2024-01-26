@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use git_symbolic_refs::GitSymbolicRefsEntry;
-use gix_hash::ObjectId;
 use mononoke_api::CoreContext;
 use packfile::bundle::BundleWriter;
 use packfile::pack::DeltaForm;
@@ -67,7 +66,7 @@ pub async fn create_git_repo_on_disk(
         .context("Error in generating pack item stream")?;
 
     // Since this is a full clone
-    let prereqs: Option<Vec<ObjectId>> = None;
+    let prereqs = Vec::new();
 
     // Create the bundle writer with the header pre-written
     let concurrency = 1000;

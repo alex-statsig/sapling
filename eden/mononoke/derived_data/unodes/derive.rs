@@ -30,6 +30,7 @@ use manifest::Entry;
 use manifest::LeafInfo;
 use manifest::ManifestChanges;
 use manifest::TreeInfo;
+use mononoke_types::path::MPath;
 use mononoke_types::unode::FileUnode;
 use mononoke_types::unode::ManifestUnode;
 use mononoke_types::unode::UnodeEntry;
@@ -141,7 +142,7 @@ pub(crate) async fn derive_unode_manifest(
         None => {
             // All files have been deleted, generate empty **root** manifest
             let tree_info = TreeInfo {
-                path: None,
+                path: MPath::ROOT,
                 parents,
                 subentries: Default::default(),
             };
@@ -515,9 +516,9 @@ mod tests {
             assert_eq!(
                 paths,
                 vec![
-                    None,
-                    Some(NonRootMPath::new("1").unwrap()),
-                    Some(NonRootMPath::new("files").unwrap())
+                    MPath::ROOT,
+                    MPath::new("1").unwrap(),
+                    MPath::new("files").unwrap()
                 ]
             );
             unode_id
@@ -555,10 +556,10 @@ mod tests {
             assert_eq!(
                 paths,
                 vec![
-                    None,
-                    Some(NonRootMPath::new("1").unwrap()),
-                    Some(NonRootMPath::new("2").unwrap()),
-                    Some(NonRootMPath::new("files").unwrap())
+                    MPath::ROOT,
+                    MPath::new("1").unwrap(),
+                    MPath::new("2").unwrap(),
+                    MPath::new("files").unwrap()
                 ]
             );
         }
@@ -592,7 +593,7 @@ mod tests {
             // Unodes should be unique even if content is the same. Check it
             let vals: Vec<_> = unode_mf.list().collect();
             assert_eq!(vals.len(), 2);
-            assert_ne!(vals.get(0), vals.get(1));
+            assert_ne!(vals.first(), vals.get(1));
             Ok(())
         }
 

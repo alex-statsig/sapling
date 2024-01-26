@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "es6",
-    "lib": ["dom", "dom.iterable"],
+    "lib": ["ES2021.WeakRef", "dom", "dom.iterable"],
     "allowJs": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -26,5 +26,5 @@
       "module": "commonjs"
     }
   },
-  "include": ["src", "webpack.config.ts", "jest.config.js", "proxy"]
+  "include": ["src", "webpack.config.ts", "jest.config.js", "rollup.config.mjs", "proxy"]
 }

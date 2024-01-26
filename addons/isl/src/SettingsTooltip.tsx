@@ -33,6 +33,7 @@ import {
   VSCodeLink,
   VSCodeOption,
 } from '@vscode/webview-ui-toolkit/react';
+import {useAtom} from 'jotai';
 import {useRecoilState, useRecoilValue} from 'recoil';
 import {Icon} from 'shared/Icon';
 import {KeyCode, Modifier} from 'shared/KeyboardShortcuts';
@@ -66,10 +67,10 @@ function SettingsDropdown({
   dismiss: () => unknown;
   showShortcutsHelp: () => unknown;
 }) {
-  const [theme, setTheme] = useRecoilState(themeState);
+  const [theme, setTheme] = useAtom(themeState);
   const [repoInfo, setRepoInfo] = useRecoilState(repositoryInfo);
   const runOperation = useRunOperation();
-  const [showDiffNumber, setShowDiffNumber] = useRecoilState(showDiffNumberConfig);
+  const [showDiffNumber, setShowDiffNumber] = useAtom(showDiffNumberConfig);
   return (
     <DropdownFields title={<T>Settings</T>} icon="gear" data-testid="settings-dropdown">
       <VSCodeButton
@@ -184,7 +185,7 @@ function SettingsDropdown({
 }
 
 function ConfirmSubmitStackSetting() {
-  const [value, setValue] = useRecoilState(confirmShouldSubmitEnabledAtom);
+  const [value, setValue] = useAtom(confirmShouldSubmitEnabledAtom);
   const provider = useRecoilValue(codeReviewProvider);
   if (provider == null || !provider.supportSubmittingAsDraft) {
     return null;
@@ -208,7 +209,7 @@ function ConfirmSubmitStackSetting() {
 }
 
 function RenderCompactSetting() {
-  const [value, setValue] = useRecoilState(renderCompactAtom);
+  const [value, setValue] = useAtom(renderCompactAtom);
   return (
     <Tooltip
       title={t(
@@ -227,7 +228,7 @@ function RenderCompactSetting() {
 }
 
 function ZoomUISetting() {
-  const [zoom, setZoom] = useRecoilState(zoomUISettingAtom);
+  const [zoom, setZoom] = useAtom(zoomUISettingAtom);
   function roundToPercent(n: number): number {
     return Math.round(n * 100) / 100;
   }
@@ -238,7 +239,7 @@ function ZoomUISetting() {
           className="zoom-out"
           appearance="icon"
           onClick={() => {
-            setZoom(zoom => roundToPercent(zoom - 0.1));
+            setZoom(roundToPercent(zoom - 0.1));
           }}>
           <Icon icon="zoom-out" />
         </VSCodeButton>
@@ -249,7 +250,7 @@ function ZoomUISetting() {
           className="zoom-in"
           appearance="icon"
           onClick={() => {
-            setZoom(zoom => roundToPercent(zoom + 0.1));
+            setZoom(roundToPercent(zoom + 0.1));
           }}>
           <Icon icon="zoom-in" />
         </VSCodeButton>
@@ -287,7 +288,7 @@ function ZoomUISetting() {
 }
 
 function DebugToolsField() {
-  const [isDebug, setIsDebug] = useRecoilState(debugToolsEnabledState);
+  const [isDebug, setIsDebug] = useAtom(debugToolsEnabledState);
 
   return (
     <DropdownField title={t('Debug Tools')}>

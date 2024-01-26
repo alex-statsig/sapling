@@ -63,6 +63,7 @@ pub mod utils;
 
 // Re-exports from mononoke_types. Eventually these should go away and everything should depend
 // directly on mononoke_types;
+pub use mononoke_types::path::MPath;
 pub use mononoke_types::sha1_hash;
 pub use mononoke_types::FileType;
 pub use mononoke_types::Globalrev;
@@ -112,5 +113,6 @@ mod test;
 
 mod thrift {
     pub use mercurial_thrift::*;
+    #[cfg(test)]
     pub use mononoke_types_thrift::*;
 }

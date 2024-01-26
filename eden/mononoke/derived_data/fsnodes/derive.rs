@@ -44,6 +44,7 @@ use mononoke_types::fsnode::FsnodeFile;
 use mononoke_types::fsnode::FsnodeSummary;
 use mononoke_types::hash::Sha1;
 use mononoke_types::hash::Sha256;
+use mononoke_types::path::MPath;
 use mononoke_types::BlobstoreKey;
 use mononoke_types::BlobstoreValue;
 use mononoke_types::ChangesetId;
@@ -174,7 +175,7 @@ pub(crate) async fn derive_fsnode(
         None => {
             // All files have been deleted, generate empty fsnode
             let tree_info = TreeInfo {
-                path: None,
+                path: MPath::ROOT,
                 parents,
                 subentries: Default::default(),
             };
@@ -532,9 +533,9 @@ mod test {
             assert_eq!(
                 all_fsnodes.keys().collect::<Vec<_>>(),
                 vec![
-                    &None,
-                    &Some(NonRootMPath::new("1").unwrap()),
-                    &Some(NonRootMPath::new("files").unwrap())
+                    &MPath::ROOT,
+                    &MPath::new("1").unwrap(),
+                    &MPath::new("files").unwrap()
                 ]
             );
 
@@ -588,10 +589,10 @@ mod test {
             assert_eq!(
                 all_fsnodes.keys().collect::<Vec<_>>(),
                 vec![
-                    &None,
-                    &Some(NonRootMPath::new("1").unwrap()),
-                    &Some(NonRootMPath::new("2").unwrap()),
-                    &Some(NonRootMPath::new("files").unwrap())
+                    &MPath::ROOT,
+                    &MPath::new("1").unwrap(),
+                    &MPath::new("2").unwrap(),
+                    &MPath::new("files").unwrap()
                 ]
             );
 
@@ -677,21 +678,21 @@ mod test {
             assert_eq!(
                 all_fsnodes.keys().collect::<Vec<_>>(),
                 vec![
-                    &None,
-                    &Some(NonRootMPath::new("1").unwrap()),
-                    &Some(NonRootMPath::new("2").unwrap()),
-                    &Some(NonRootMPath::new("dir1").unwrap()),
-                    &Some(NonRootMPath::new("dir1/file_1_in_dir1").unwrap()),
-                    &Some(NonRootMPath::new("dir1/file_2_in_dir1").unwrap()),
-                    &Some(NonRootMPath::new("dir1/subdir1").unwrap()),
-                    &Some(NonRootMPath::new("dir1/subdir1/file_1").unwrap()),
-                    &Some(NonRootMPath::new("dir1/subdir1/subsubdir1").unwrap()),
-                    &Some(NonRootMPath::new("dir1/subdir1/subsubdir1/file_1").unwrap()),
-                    &Some(NonRootMPath::new("dir1/subdir1/subsubdir2").unwrap()),
-                    &Some(NonRootMPath::new("dir1/subdir1/subsubdir2/file_1").unwrap()),
-                    &Some(NonRootMPath::new("dir1/subdir1/subsubdir2/file_2").unwrap()),
-                    &Some(NonRootMPath::new("dir2").unwrap()),
-                    &Some(NonRootMPath::new("dir2/file_1_in_dir2").unwrap()),
+                    &MPath::ROOT,
+                    &MPath::new("1").unwrap(),
+                    &MPath::new("2").unwrap(),
+                    &MPath::new("dir1").unwrap(),
+                    &MPath::new("dir1/file_1_in_dir1").unwrap(),
+                    &MPath::new("dir1/file_2_in_dir1").unwrap(),
+                    &MPath::new("dir1/subdir1").unwrap(),
+                    &MPath::new("dir1/subdir1/file_1").unwrap(),
+                    &MPath::new("dir1/subdir1/subsubdir1").unwrap(),
+                    &MPath::new("dir1/subdir1/subsubdir1/file_1").unwrap(),
+                    &MPath::new("dir1/subdir1/subsubdir2").unwrap(),
+                    &MPath::new("dir1/subdir1/subsubdir2/file_1").unwrap(),
+                    &MPath::new("dir1/subdir1/subsubdir2/file_2").unwrap(),
+                    &MPath::new("dir2").unwrap(),
+                    &MPath::new("dir2/file_1_in_dir2").unwrap(),
                 ]
             );
 
@@ -735,11 +736,10 @@ mod test {
             );
 
             // Check one of the deeper fsnodes.
-            let deep_fsnode_id =
-                match all_fsnodes.get(&Some(NonRootMPath::new("dir1/subdir1").unwrap())) {
-                    Some(Entry::Tree(fsnode_id)) => fsnode_id,
-                    _ => panic!("dir1/subdir1 fsnode should be a tree"),
-                };
+            let deep_fsnode_id = match all_fsnodes.get(&MPath::new("dir1/subdir1").unwrap()) {
+                Some(Entry::Tree(fsnode_id)) => fsnode_id,
+                _ => panic!("dir1/subdir1 fsnode should be a tree"),
+            };
             let deep_fsnode = runtime
                 .block_on(deep_fsnode_id.load(&ctx, repo.repo_blobstore()))
                 .unwrap();
@@ -863,12 +863,12 @@ mod test {
             assert_eq!(
                 all_fsnodes.keys().collect::<Vec<_>>(),
                 vec![
-                    &None,
-                    &Some(NonRootMPath::new("1").unwrap()),
-                    &Some(NonRootMPath::new("2").unwrap()),
-                    &Some(NonRootMPath::new("dir1").unwrap()),
-                    &Some(NonRootMPath::new("dir2").unwrap()),
-                    &Some(NonRootMPath::new("dir2/file_1_in_dir2").unwrap()),
+                    &MPath::ROOT,
+                    &MPath::new("1").unwrap(),
+                    &MPath::new("2").unwrap(),
+                    &MPath::new("dir1").unwrap(),
+                    &MPath::new("dir2").unwrap(),
+                    &MPath::new("dir2/file_1_in_dir2").unwrap(),
                 ]
             );
 

@@ -11,13 +11,13 @@ import {Internal} from './Internal';
 import {DOCUMENTATION_DELAY, Tooltip} from './Tooltip';
 import {VSCodeButtonDropdown} from './VSCodeButtonDropdown';
 import {t, T} from './i18n';
+import {configBackedAtom} from './jotaiUtils';
 import {PullOperation} from './operations/PullOperation';
-import {persistAtomToConfigEffect} from './persistAtomToConfigEffect';
 import {uncommittedChangesWithPreviews, useMostRecentPendingOperation} from './previews';
-import {relativeDate, RelativeDate} from './relativeDate';
-import {latestCommits, useRunOperation} from './serverAPIState';
+import {useRunOperation} from './serverAPIState';
 import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
-import {atom, useRecoilState, useRecoilValue} from 'recoil';
+import {useAtom} from 'jotai';
+import {useRecoilValue} from 'recoil';
 import {Icon} from 'shared/Icon';
 
 import './PullButton.css';
@@ -30,11 +30,10 @@ const DEFAULT_PULL_BUTTON = {
   tooltip: t('Fetch latest repository and branch information from remote.'),
   allowWithUncommittedChanges: true,
 };
-const pullButtonChoiceKey = atom<string>({
-  key: 'pullButtonChoiceKey',
-  default: DEFAULT_PULL_BUTTON.id,
-  effects: [persistAtomToConfigEffect('isl.pull-button-choice')],
-});
+const pullButtonChoiceKey = configBackedAtom<string>(
+  'isl.pull-button-choice',
+  DEFAULT_PULL_BUTTON.id,
+);
 
 export type PullButtonOption = {
   id: string;
@@ -47,16 +46,11 @@ export type PullButtonOption = {
 
 export function PullButton() {
   const runOperation = useRunOperation();
-  // no need to use previews here, we only need the latest commits to find the last pull timestamp.
-  const commits = useRecoilValue(latestCommits);
-  // assuming master is getting updated frequently, last pull time should equal the newest commit in the history.
-  const lastSync =
-    commits.length === 0 ? null : Math.max(...commits.map(info => info.date.valueOf()));
 
   const pullButtonOptions: Array<PullButtonOption> = [];
   pullButtonOptions.push(DEFAULT_PULL_BUTTON, ...(Internal.additionalPullOptions ?? []));
 
-  const [dropdownChoiceKey, setDropdownChoiceKey] = useRecoilState(pullButtonChoiceKey);
+  const [dropdownChoiceKey, setDropdownChoiceKey] = useAtom(pullButtonChoiceKey);
   const currentChoice =
     pullButtonOptions.find(option => option.id === dropdownChoiceKey) ?? pullButtonOptions[0];
 
@@ -70,12 +64,6 @@ export function PullButton() {
 
   let tooltip =
     currentChoice.tooltip +
-    (lastSync == null
-      ? ''
-      : '\n\n' +
-        t('Latest fetched commit is $date old', {
-          replace: {$date: relativeDate(lastSync, {useRelativeForm: true})},
-        })) +
     (disabledFromUncommittedChanges == false
       ? ''
       : '\n\n' + t('Disabled due to uncommitted changes.'));
@@ -109,7 +97,6 @@ export function PullButton() {
             <T>Pull</T>
           </VSCodeButton>
         )}
-        {lastSync && <RelativeDate date={lastSync} useShortVariant />}
       </div>
     </Tooltip>
   );

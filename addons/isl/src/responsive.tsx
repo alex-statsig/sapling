@@ -5,54 +5,41 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import {globalRecoil} from './AccessGlobalRecoil';
 import {useCommand} from './ISLShortcuts';
 import {
-  persistAtomToConfigEffect,
-  persistAtomToLocalStorageEffect,
-} from './persistAtomToConfigEffect';
+  configBackedAtom,
+  localStorageBackedAtom,
+  atomWithOnChange,
+  readAtom,
+  writeAtom,
+} from './jotaiUtils';
+import {atom, useSetAtom} from 'jotai';
 import {useRef, useEffect} from 'react';
-import {atom, selector, useSetRecoilState} from 'recoil';
 
-export const mainContentWidthState = atom({
-  key: 'mainContentWidthState',
-  default: 500,
-});
+export const mainContentWidthState = atom(500);
 
-export const renderCompactAtom = atom<boolean>({
-  key: 'renderCompactAtom',
-  default: false,
-  effects: [persistAtomToConfigEffect('isl.render-compact', false as boolean)],
-});
+export const renderCompactAtom = configBackedAtom<boolean>('isl.render-compact', false);
 
-export const zoomUISettingAtom = atom<number>({
-  key: 'zoomUISettingAtom',
-  default: 1.0,
-  effects: [
-    persistAtomToLocalStorageEffect('isl.ui-zoom'),
-    ({onSet, getLoadable}) => {
-      const initial = getLoadable(zoomUISettingAtom).valueMaybe();
-      if (initial != null) {
-        document.body?.style.setProperty('--zoom', `${initial}`);
-      }
-      onSet(newValue => {
-        document.body?.style.setProperty('--zoom', `${newValue}`);
-      });
-    },
-  ],
-});
+export const zoomUISettingAtom = atomWithOnChange(
+  localStorageBackedAtom<number>('isl.ui-zoom', 1),
+  newValue => {
+    document.body?.style.setProperty('--zoom', `${newValue}`);
+  },
+);
 
 export function useZoomShortcut() {
   useCommand('ZoomIn', () => {
-    globalRecoil().set(zoomUISettingAtom, old => Math.round((old + 0.1) * 100) / 100);
+    const old = readAtom(zoomUISettingAtom);
+    writeAtom(zoomUISettingAtom, Math.round((old + 0.1) * 100) / 100);
   });
   useCommand('ZoomOut', () => {
-    globalRecoil().set(zoomUISettingAtom, old => Math.round((old - 0.1) * 100) / 100);
+    const old = readAtom(zoomUISettingAtom);
+    writeAtom(zoomUISettingAtom, Math.round((old - 0.1) * 100) / 100);
   });
 }
 
 export function useMainContentWidth() {
-  const setMainContentWidth = useSetRecoilState(mainContentWidthState);
+  const setMainContentWidth = useSetAtom(mainContentWidthState);
 
   const mainContentRef = useRef<null | HTMLDivElement>(null);
   useEffect(() => {
@@ -75,9 +62,8 @@ export function useMainContentWidth() {
 export const NARROW_COMMIT_TREE_WIDTH = 800;
 export const NARROW_COMMIT_TREE_WIDTH_WHEN_COMPACT = 300;
 
-export const isNarrowCommitTree = selector({
-  key: 'isNarrowCommitTree',
-  get: ({get}) =>
+export const isNarrowCommitTree = atom(
+  get =>
     get(mainContentWidthState) <
     (get(renderCompactAtom) ? NARROW_COMMIT_TREE_WIDTH_WHEN_COMPACT : NARROW_COMMIT_TREE_WIDTH),
-});
+);

@@ -39,7 +39,6 @@ use repo_update_logger::CommitInfo;
 use scuba_ext::MononokeScubaSampleBuilder;
 use slog::debug;
 use stats::prelude::*;
-use tunables::tunables;
 
 use crate::hook_running::map_hook_rejections;
 use crate::hook_running::HookRejectionRemapper;
@@ -474,7 +473,11 @@ async fn normal_pushrebase<'a>(
     cross_repo_push_source: CrossRepoPushSource,
 ) -> Result<(ChangesetId, Vec<pushrebase::PushrebaseChangesetPair>), BundleResolverError> {
     let bookmark_restriction = BookmarkKindRestrictions::OnlyPublishing;
-    let remote_mode = if tunables().force_local_pushrebase().unwrap_or_default() {
+    let remote_mode = if let Ok(true) = justknobs::eval(
+        "scm/mononoke:mononoke_force_local_pushrebase",
+        None,
+        Some(repo.repo_identity().name()),
+    ) {
         PushrebaseRemoteMode::Local
     } else {
         repo.repo_config().pushrebase.remote_mode.clone()
@@ -602,13 +605,13 @@ async fn plain_push_bookmark(
     cross_repo_push_source: CrossRepoPushSource,
 ) -> Result<(), BundleResolverError> {
     let authz = AuthorizationContext::new(ctx);
-    // Override the tunable if we know for sure writes are not allowed
-    let only_log_acl_checks = !matches!(
-        authz,
-        AuthorizationContext::ReadOnlyIdentity | AuthorizationContext::DraftOnlyIdentity,
-    ) && tunables()
-        .log_only_wireproto_write_acl()
-        .unwrap_or_default();
+    // Override the justknob if we know for sure writes are not allowed
+    let only_log_acl_checks =
+        !matches!(
+            authz,
+            AuthorizationContext::ReadOnlyIdentity | AuthorizationContext::DraftOnlyIdentity,
+        ) && justknobs::eval("scm/mononoke:wireproto_log_only_write_acl", None, None)
+            .unwrap_or_default();
     match (bookmark_push.old, bookmark_push.new) {
         (None, Some(new_target)) => {
             let res =
@@ -705,13 +708,13 @@ async fn infinitepush_scratch_bookmark(
     cross_repo_push_source: CrossRepoPushSource,
 ) -> Result<()> {
     let authz = AuthorizationContext::new(ctx);
-    // Override the tunable if we know for sure writes are not allowed
-    let only_log_acl_checks = !matches!(
-        authz,
-        AuthorizationContext::ReadOnlyIdentity | AuthorizationContext::DraftOnlyIdentity,
-    ) && tunables()
-        .log_only_wireproto_write_acl()
-        .unwrap_or_default();
+    // Override the justknob if we know for sure writes are not allowed
+    let only_log_acl_checks =
+        !matches!(
+            authz,
+            AuthorizationContext::ReadOnlyIdentity | AuthorizationContext::DraftOnlyIdentity,
+        ) && justknobs::eval("scm/mononoke:wireproto_log_only_write_acl", None, None)
+            .unwrap_or_default();
     if bookmark_push.old.is_none() && bookmark_push.create {
         bookmarks_movement::CreateBookmarkOp::new(
             &bookmark_push.name,

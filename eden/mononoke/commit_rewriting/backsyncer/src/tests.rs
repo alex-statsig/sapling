@@ -48,6 +48,10 @@ use futures::FutureExt;
 use futures::TryFutureExt;
 use futures::TryStreamExt;
 use futures_ext::FbTryFutureExt;
+use justknobs::test_helpers::override_just_knobs;
+use justknobs::test_helpers::with_just_knobs_async;
+use justknobs::test_helpers::JustKnobsInMemory;
+use justknobs::test_helpers::KnobVal;
 use live_commit_sync_config::TestLiveCommitSyncConfig;
 use manifest::Entry;
 use manifest::ManifestOps;
@@ -84,7 +88,6 @@ use tests_utils::store_files;
 use tests_utils::store_rename;
 use tests_utils::CreateCommitContext;
 use tokio::runtime::Runtime;
-use tunables::with_tunables_async;
 use wireproto_handler::TargetRepoDbs;
 
 use crate::backsync_latest;
@@ -806,9 +809,8 @@ async fn backsync_change_mapping(fb: FacebookInit) -> Result<(), Error> {
         .await?;
 
     // Do the backsync, and check the version
-    let tunables = tunables::MononokeTunables::default();
-    tunables.update_bools(&hashmap! {
-        "allow_change_xrepo_mapping_extra".to_string() => true,
+    let jk = JustKnobsInMemory::new(hashmap! {
+        "scm/mononoke:ignore_change_xrepo_mapping_extra".to_string() => KnobVal::Bool(false),
     });
 
     let f = backsync_latest(
@@ -821,7 +823,7 @@ async fn backsync_change_mapping(fb: FacebookInit) -> Result<(), Error> {
         false,
         Box::new(future::ready(())),
     );
-    with_tunables_async(tunables, f.boxed()).await?.await;
+    with_just_knobs_async(jk, f.boxed()).await?.await;
 
     let commit_sync_outcome = commit_syncer
         .get_commit_sync_outcome(&ctx, before_mapping_change)
@@ -1298,6 +1300,10 @@ async fn init_repos(
     ),
     Error,
 > {
+    override_just_knobs(Some(JustKnobsInMemory::new(hashmap! {
+        "scm/mononoke:cross_repo_skip_backsyncing_ordinary_empty_commits".to_string() => KnobVal::Bool(false),
+        "scm/mononoke:ignore_change_xrepo_mapping_extra".to_string() => KnobVal::Bool(false),
+    })));
     let ctx = CoreContext::test_mock(fb);
     let mut factory = TestRepoFactory::new(fb)?;
     let source_repo_id = RepositoryId::new(1);

@@ -26,33 +26,29 @@ import type {EnsureAssignedTogether} from 'shared/EnsureAssignedTogether';
 import serverAPI from './ClientToServerAPI';
 import messageBus from './MessageBus';
 import {latestSuccessorsMap, successionTracker} from './SuccessionTracker';
-import {Dag} from './dag/dag';
-import {persistAtomToConfigEffect} from './persistAtomToConfigEffect';
-import {clearOnCwdChange} from './recoilUtils';
+import {Dag, DagCommitInfo} from './dag/dag';
+import {configBackedAtom, writeAtom} from './jotaiUtils';
+import {clearOnCwdChange, entangledAtoms} from './recoilUtils';
 import {initialParams} from './urlParams';
 import {short} from './utils';
 import {DEFAULT_DAYS_OF_COMMITS_TO_LOAD} from 'isl-server/src/constants';
 import {selectorFamily, atom, DefaultValue, selector, useRecoilCallback} from 'recoil';
+import {reuseEqualObjects} from 'shared/deepEqualExt';
 import {defer, randomId} from 'shared/utils';
 
-const repositoryData = atom<{info: RepoInfo | undefined; cwd: string | undefined}>({
+const [jotaiRepositoryData, repositoryData] = entangledAtoms<{info?: RepoInfo; cwd?: string}>({
   key: 'repositoryData',
-  default: {info: undefined, cwd: undefined},
-  effects: [
-    ({setSelf}) => {
-      const disposable = serverAPI.onMessageOfType('repoInfo', event => {
-        setSelf({info: event.info, cwd: event.cwd});
-      });
-      return () => disposable.dispose();
-    },
-    () =>
-      serverAPI.onSetup(() =>
-        serverAPI.postMessage({
-          type: 'requestRepoInfo',
-        }),
-      ),
-  ],
+  default: {},
 });
+
+serverAPI.onMessageOfType('repoInfo', event => {
+  writeAtom(jotaiRepositoryData, {info: event.info, cwd: event.cwd});
+});
+serverAPI.onSetup(() =>
+  serverAPI.postMessage({
+    type: 'requestRepoInfo',
+  }),
+);
 
 export const repositoryInfo = selector<RepoInfo | undefined>({
   key: 'repositoryInfo',
@@ -186,15 +182,19 @@ export const latestCommitsData = atom<{
   default: {fetchStartTimestamp: 0, fetchCompletedTimestamp: 0, commits: []},
   effects: [
     subscriptionEffect('smartlogCommits', (data, {setSelf}) => {
-      setSelf(last => ({
-        ...data,
-        commits:
-          data.commits.value ??
-          // leave existing files in place if there was no error
-          (last instanceof DefaultValue ? [] : last.commits) ??
-          [],
-        error: data.commits.error,
-      }));
+      setSelf(last => {
+        let commits = last instanceof DefaultValue ? [] : last.commits;
+        const newCommits = data.commits.value;
+        if (newCommits != null) {
+          // leave existing commits in place if there was no erro
+          commits = reuseEqualObjects(commits, newCommits, c => c.hash);
+        }
+        return {
+          ...data,
+          commits,
+          error: data.commits.error,
+        };
+      });
       if (data.commits.value) {
         successionTracker.findNewSuccessionsFromCommits(data.commits.value);
       }
@@ -236,7 +236,9 @@ export const latestDag = selector<Dag>({
     const commits = get(latestCommits);
     const successorMap = get(latestSuccessorsMap);
     const commitDag = undefined; // will be populated from `commits`
-    const dag = Dag.fromDag(commitDag, successorMap).add(commits).forceConnectPublic();
+    const dag = Dag.fromDag(commitDag, successorMap)
+      .add(commits.map(c => DagCommitInfo.fromCommitInfo(c)))
+      .forceConnectPublic();
     return dag;
   },
 });
@@ -254,11 +256,11 @@ export const mostRecentSubscriptionIds: Record<SubscriptionKind, string> = {
   mergeConflicts: '',
 };
 
-export const hasExperimentalFeatures = atom<boolean | null>({
-  key: 'hasExperimentalFeatures',
-  default: null,
-  effects: [persistAtomToConfigEffect<boolean | null>('isl.experimental-features', false)],
-});
+export const hasExperimentalFeatures = configBackedAtom<boolean | null>(
+  'isl.experimental-features',
+  false,
+  true /* read-only */,
+);
 
 /**
  * Send a subscribeFoo message to the server on initialization,

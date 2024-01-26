@@ -78,21 +78,7 @@ pub type TunableVecOfStringsByRepo = ArcSwap<HashMap<String, Vec<String>>>;
 
 #[derive(Tunables, Default, Debug)]
 pub struct MononokeTunables {
-    filenodes_disabled: TunableBool,
     warm_bookmark_cache_poll_interval_ms: TunableI64,
-    disable_repo_client_warm_bookmarks_cache: TunableBool,
-    xrepo_sync_disable_all_syncs: TunableBool,
-    xrepo_disable_commit_sync_lease: TunableBool,
-    allow_change_xrepo_mapping_extra: TunableBool,
-    // What timeout to use when doing filenode lookup.
-    // Usually filenode lookup is used while generating hg changesets
-    filenode_lookup_timeout_ms: TunableI64,
-    // Sampling ratio percentage for warm boomark cache.
-    warm_bookmark_cache_logging_sampling_pct: TunableI64,
-    // Control whether the BYPASS_READONLY pushvar is restricted by an ACL
-    enforce_bypass_readonly_acl: TunableBool,
-    // Boolean to batch requests sent to Land Service
-    batching_to_land_service: TunableBool,
     // Which region writes should be done to, in order to minimise latency.
     // This should align with underlying storage (SQL/Manifold) write regions.
     // Notice writes still work from any region, and this field is not necessarily
@@ -102,37 +88,6 @@ pub struct MononokeTunables {
     // with removing it, but this tunable can be used as a quick killswitch to
     // enable them again.
     sql_lag_monitoring_blocklist: TunableVecOfStrings,
-    // If set, the hook won't be created at all
-    disable_check_write_permissions_hook: TunableBool,
-    // If set, the check result will be discarded for user identities
-    log_only_for_users_in_cwp_hook: TunableBool,
-    // If set, the check result will be discarded for service identities
-    log_only_for_services_in_cwp_hook: TunableBool,
-    // If set, the wireproto implementation will only log the repo write ACL
-    // check result.
-    log_only_wireproto_write_acl: TunableBool,
-    // If set the `draft` ACL action will be checked and logged on draft access
-    // Unless `enforce_draft_acl` is set `read` action will still be used for
-    // granting access.
-    log_draft_acl_failures: TunableBool,
-    // If set the `draft` ACL action will be used for `draft` access.
-    enforce_draft_acl: TunableBool,
-    // Force local pushrebase instead of talking to SCS or Land Service
-    force_local_pushrebase: TunableBool,
-    // Enable usage of basename_suffix_skeleton_manifest in commit_find_files
-    disable_basename_suffix_skeleton_manifest: TunableBool,
-    // Enable using BSSM for suffix queries. Might be inneficient for broad suffixes (like .php)
-    enable_bssm_suffix_query: TunableBool,
-    // Enable using optimized BSSM derivation.
-    enable_bssm_optimized_derivation: TunableBool,
-    // List of targets in AOSP megarepo to apply squashing config overrides
-    megarepo_squashing_config_override_targets: TunableVecOfStringsByRepo,
-    // Override squashing limit for listed targets
-    megarepo_override_squashing_limit: TunableI64ByRepo,
-    // Override author check during squashing
-    megarepo_override_author_check: TunableBoolByRepo,
-    // Skip backsyncing for empty commits (except mapping changes via extras and merges)
-    cross_repo_skip_backsyncing_ordinary_empty_commits: TunableBoolByRepo,
 }
 
 fn log_tunables(tunables: &TunablesStruct) -> String {
